@@ -41,3 +41,7 @@ htmlcov/
 .factory-lock
 
 .langgraph_api/
+
+# For execution build 
+execution
+examples

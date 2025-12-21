@@ -819,6 +819,162 @@ def commit(run_id: str, repo: str):
         raise SystemExit(1)
 
 
+# Phase 3A: Step extraction
+@cli.command()
+@click.argument("run_id")
+@click.option(
+    "--slug",
+    default="extracted",
+    help="Slug for the output filename (e.g., 'step_extractor' -> S01_step_extractor.md)",
+)
+@click.option(
+    "--execution-dir",
+    type=click.Path(),
+    default="execution",
+    help="Path to execution directory (default: ./execution)",
+)
+def extract(run_id: str, slug: str, execution_dir: str):
+    """Extract an execution step document from an approved run.
+    
+    Exit codes:
+      0 = success
+      1 = run not found or no synthesis
+      2 = run not approved
+    """
+    from pathlib import Path
+    from uuid import UUID as UUIDType
+    from agentic_mvp_factory.step_extractor import (
+        extract_step_from_run,
+        RunNotFoundError,
+        RunNotApprovedError,
+        NoSynthesisError,
+    )
+    
+    try:
+        run_uuid = UUIDType(run_id)
+    except ValueError:
+        click.echo(f"Error: Invalid run ID format: {run_id}", err=True)
+        raise SystemExit(1)
+    
+    exec_path = Path(execution_dir).resolve()
+    
+    try:
+        output_path = extract_step_from_run(
+            run_id=run_uuid,
+            execution_dir=exec_path,
+            output_slug=slug,
+        )
+        
+        click.echo(f"Step document created: {output_path}")
+        click.echo()
+        click.echo("Next steps:")
+        click.echo(f"  1. Edit the step document to refine scope and instructions")
+        click.echo(f"  2. Have Cursor implement the step")
+        click.echo(f"  3. Run proof commands and record delta")
+        click.echo()
+        click.echo(f"Open with: $EDITOR {output_path}")
+        
+    except RunNotFoundError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+    except NoSynthesisError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+    except RunNotApprovedError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(2)
+    except Exception as e:
+        click.echo(f"Unexpected error: {e}", err=True)
+        raise SystemExit(1)
+
+
+# Phase 3: Step runner and review
+@cli.command("exec")
+@click.argument("step_file", type=click.Path(exists=True))
+@click.option(
+    "--output-dir",
+    type=click.Path(),
+    default="execution/reports",
+    help="Directory for execution reports (default: execution/reports)",
+)
+def exec_step(step_file: str, output_dir: str):
+    """Execute a single step definition file.
+    
+    STEP_FILE: Path to step definition (YAML or JSON)
+    
+    Step definition format:
+    
+    \b
+        task_id: my-task-001
+        file_path: path/to/script.py
+        max_retries: 1  # optional
+    """
+    from pathlib import Path
+    from agentic_mvp_factory.step_runner import run_step
+    
+    step_path = Path(step_file).resolve()
+    out_path = Path(output_dir).resolve()
+    
+    click.echo(f"Executing step: {step_path}")
+    click.echo()
+    
+    try:
+        final_state = run_step(step_path, out_path)
+        
+        if final_state.status == "SUCCESS":
+            raise SystemExit(0)
+        else:
+            raise SystemExit(1)
+            
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+    except Exception as e:
+        click.echo(f"Unexpected error: {e}", err=True)
+        raise SystemExit(1)
+
+
+@cli.command("review")
+@click.argument("report_file", type=click.Path(exists=True))
+@click.option(
+    "--delta-dir",
+    type=click.Path(),
+    default="execution/deltas",
+    help="Directory for delta files (default: execution/deltas)",
+)
+def review_step(report_file: str, delta_dir: str):
+    """Review an execution report and record decision.
+    
+    REPORT_FILE: Path to execution report JSON
+    
+    Shows a review template, prompts for ACCEPT/REJECT,
+    and writes a delta JSON file on ACCEPT.
+    """
+    from pathlib import Path
+    from agentic_mvp_factory.review_flow import run_review
+    
+    report_path = Path(report_file).resolve()
+    delta_path = Path(delta_dir).resolve()
+    
+    try:
+        decision, _ = run_review(report_path, delta_path)
+        
+        if decision == "ACCEPT":
+            raise SystemExit(0)
+        else:
+            raise SystemExit(1)
+            
+    except FileNotFoundError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+    except KeyboardInterrupt:
+        click.echo("\nReview cancelled.")
+        raise SystemExit(1)
+    except Exception as e:
+        click.echo(f"Unexpected error: {e}", err=True)
+        raise SystemExit(1)
+
+
 if __name__ == "__main__":
     cli()
 

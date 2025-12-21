@@ -1,3 +1,6 @@
+
+### Not using docker for the v0 build
+
 version: "3.8"
 
 services:
