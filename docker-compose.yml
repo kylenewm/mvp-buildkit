@@ -1,0 +1,23 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: council-postgres
+    environment:
+      POSTGRES_USER: council
+      POSTGRES_PASSWORD: council
+      POSTGRES_DB: council
+    ports:
+      - "5432:5432"
+    volumes:
+      - council_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U council -d council"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  council_data:
+

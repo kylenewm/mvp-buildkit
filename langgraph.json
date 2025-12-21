@@ -1,0 +1,8 @@
+{
+  "python_version": "3.11",
+  "dependencies": ["."],
+  "graphs": {
+    "council": "./src/agentic_mvp_factory/graph.py:graph"
+  },
+  "env": ".env"
+}

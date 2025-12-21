@@ -1,0 +1,1 @@
+agentic-mvp-factory is a CLI-first council runner that coordinates multiple models to draft, critique, and synthesize build plans, then pauses for human approval and writes a minimal artifact pack (tracker, prompts, rules) into a target repo so you can build faster in Cursor.

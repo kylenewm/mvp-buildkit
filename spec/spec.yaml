@@ -1,0 +1,174 @@
+schema_version: 0.1
+updated_at: 2025-12-20
+
+project:
+  name: agentic-mvp-factory
+  slug: agentic-mvp-factory
+  north_star: >
+    A CLI-first council runner that orchestrates multi-model debate with HITL approval,
+    then commits a minimal artifact pack into a target repo to drive Cursor builds.
+  done_enough_v0:
+    - "Can run a council (drafts + critiques + chair synthesis) across >= 2 models"
+    - "Pauses for HITL decision (approve | edit+approve | reject)"
+    - "Resumes from a fresh CLI session using Postgres persistence"
+    - "On approval, commits a Phase-2-style artifact pack stub into a target repo"
+    - "All run artifacts are durable and inspectable by run_id"
+
+v0_mode:
+  runner_execution: "local_cli"
+  persistence: "postgres_remote"
+  ui: "none_cli_only"
+  model_gateway: "openrouter_first"
+  chair_model: "configurable_per_run"
+  outputs_versioning:
+    stable_paths: true
+    snapshot_versions: true
+    pointer_files: false
+
+constraints:
+  deployment:
+    - "Must work with a remote Postgres (Railway-style) via DATABASE_URL"
+    - "Must be runnable locally as a CLI without a web UI"
+  architecture:
+    - "LangGraph orchestration with a single HITL approval interrupt in V0"
+    - "All run artifacts persisted (packet, drafts, critiques, synthesis, approval, outputs, errors)"
+    - "Project namespace required (project_slug) to avoid cross-project context mixing"
+  integrations:
+    - "OpenRouter as the default model gateway (OpenAI + Gemini + Claude supported)"
+    - "Provider swap should be possible later via a small ModelClient interface"
+
+non_goals_v0:
+  - "Deep research / web search ingestion / evidence ledger"
+  - "Automated reviewer / sentinel enforcement"
+  - "Patch-only StateAPI and strict state guards"
+  - "Complex invariant enforcement gates"
+  - "Web UI"
+
+core_entities:
+  run:
+    id: "uuid"
+    project_slug: "string"
+    task_type: "plan"
+    status_enum:
+      - created
+      - drafting
+      - critiquing
+      - synthesizing
+      - waiting_for_approval
+      - committing
+      - completed
+      - failed
+    rerun_strategy: "new_run_id"
+    optional_lineage:
+      parent_run_id: true
+
+council_protocol_v0:
+  models:
+    min_count: 2
+    recommended_count: 3
+    required_families:
+      - "OpenAI"
+      - "Gemini_or_Claude"
+  phases:
+    - "draft_parallel: each model produces one plan draft"
+    - "critique_parallel: each model critiques the full set of drafts"
+    - "chair_synthesis: chair produces synthesis + decision packet"
+    - "hitl_approval: approve | edit+approve | reject"
+    - "commit_outputs: write repo artifacts + snapshot versions"
+  critique_topology: "each_model_critiques_all_drafts"
+  chair_outputs_required:
+    - "synthesis"
+    - "decision_packet"
+    - "repo_outputs_manifest"
+
+repo_outputs_v0:
+  stable_paths:
+    - "spec/spec.yaml"
+    - "tracker/tracker.yaml"
+    - "invariants/invariants.md"
+    - ".cursor/rules/00_global.md"
+    - ".cursor/rules/10_invariants.md"
+    - "prompts/step_template.md"
+    - "prompts/patch_template.md"
+    - "prompts/hotfix_sync.md"
+    - "prompts/review_template.md"
+    - "prompts/chair_synthesis_template.md"
+    - "docs/build_guide.md"
+  snapshot_versions_root: "versions/<timestamp>_<run_id>/"
+  required_on_commit:
+    - "Write/update stable paths (overwrites allowed in V0)"
+    - "Also snapshot all written files into versions/<timestamp>_<run_id>/"
+    - "Write a commit manifest (list of files written + hashes optional)"
+
+storage_v0:
+  postgres_tables_min:
+    - runs
+    - artifacts
+    - approvals
+    - checkpoints
+  artifact_kinds:
+    - packet
+    - draft
+    - critique
+    - synthesis
+    - decision_packet
+    - approval
+    - output
+    - commit_log
+    - error
+  artifacts_requirements:
+    - "Every model call stores raw content as an artifact row"
+    - "Artifacts may include usage_json for tokens/cost when available"
+
+cli_v0:
+  commands_min:
+    - "council init"
+    - "council run plan --project <slug> --packet <path> --models <list> --chair <model>"
+    - "council status [--project <slug>]"
+    - "council show <run_id> [--section packet|drafts|critiques|synthesis|decision|outputs|errors]"
+    - "council approve <run_id> (approve | edit+approve | reject)"
+    - "council commit <run_id> --repo <path>"
+  env_required:
+    - "DATABASE_URL"
+    - "OPENROUTER_API_KEY"
+  nice_to_have_v0:
+    - "EDITOR integration for edit+approve"
+    - "print summarized run metadata"
+
+open_questions:
+  - "Do we want migrations via Alembic or a simple SQL init for V0?"
+  - "Do we want artifact mirroring to disk in addition to Postgres storage, or Postgres-only?"
+  - "Exact output format requirements for plan_packet.md (section headings + constraints)?"
+
+milestones_v0:
+  - id: M0
+    name: "Repo scaffold"
+    exit_criteria:
+      - "CLI entrypoint runs"
+      - "Config loads DATABASE_URL + OPENROUTER_API_KEY"
+  - id: M1
+    name: "Postgres schema wired"
+    exit_criteria:
+      - "Create run + write packet artifact"
+  - id: M2
+    name: "Model gateway working"
+    exit_criteria:
+      - "Single model call stored as artifact"
+  - id: M3
+    name: "Council pipeline (no HITL)"
+    exit_criteria:
+      - "Drafts + critiques + chair synthesis stored"
+  - id: M4
+    name: "HITL interrupt + resume"
+    exit_criteria:
+      - "Pause after synthesis"
+      - "Resume from fresh CLI session"
+  - id: M5
+    name: "Commit outputs into repo"
+    exit_criteria:
+      - "Writes stable paths + snapshot versions"
+      - "Commit manifest recorded"
+  - id: M6
+    name: "Dogfood run"
+    exit_criteria:
+      - "Use council to generate initial tracker/prompts for building next iteration"

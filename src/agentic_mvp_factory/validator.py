@@ -1,0 +1,220 @@
+"""Minimal validation for run outputs before commit (S07)."""
+
+import json
+import re
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
+from uuid import UUID
+
+import yaml
+
+
+@dataclass
+class ValidationResult:
+    """Result of validating run outputs."""
+    is_valid: bool
+    details: str
+    failed_artifacts: List[str]
+
+
+# Required sections in synthesis (markdown headings)
+REQUIRED_SYNTHESIS_SECTIONS = ["SYNTHESIS", "DECISION_PACKET"]
+
+# Required top-level keys if decision_packet is YAML/JSON
+REQUIRED_DECISION_KEYS = ["decisions", "next_actions"]
+
+
+def _extract_yaml_blocks(content: str) -> List[str]:
+    """Extract YAML code blocks from markdown content."""
+    pattern = r"```ya?ml\s*(.*?)```"
+    matches = re.findall(pattern, content, re.DOTALL | re.IGNORECASE)
+    return matches
+
+
+def _extract_json_blocks(content: str) -> List[str]:
+    """Extract JSON code blocks from markdown content."""
+    pattern = r"```json\s*(.*?)```"
+    matches = re.findall(pattern, content, re.DOTALL | re.IGNORECASE)
+    return matches
+
+
+def _validate_synthesis_content(content: str) -> Tuple[bool, str]:
+    """
+    Validate synthesis artifact content.
+    
+    Checks:
+    1. Content is not empty
+    2. Contains required markdown sections
+    3. If YAML/JSON blocks exist, they parse correctly
+    
+    Returns:
+        (is_valid, error_message)
+    """
+    if not content or not content.strip():
+        return False, "Synthesis content is empty"
+    
+    # Check for required sections (case-insensitive, flexible format)
+    missing_sections = []
+    for section in REQUIRED_SYNTHESIS_SECTIONS:
+        # Accept multiple formats:
+        # - Markdown headings: ## SYNTHESIS, # SYNTHESIS
+        # - Colon format: SYNTHESIS:
+        # - Bold format: **SYNTHESIS**
+        escaped_section = re.escape(section)
+        patterns = [
+            rf"^#{{1,6}}\s*{escaped_section}",  # Markdown heading
+            rf"^{escaped_section}\s*:",          # Colon format at line start
+            rf"\*\*{escaped_section}\*\*",       # Bold format
+            rf"^{escaped_section}\b",            # Plain section name at line start
+        ]
+        found = any(
+            re.search(p, content, re.IGNORECASE | re.MULTILINE)
+            for p in patterns
+        )
+        if not found:
+            missing_sections.append(section)
+    
+    if missing_sections:
+        return False, f"Missing required sections: {', '.join(missing_sections)}"
+    
+    # Try to parse any YAML blocks
+    yaml_blocks = _extract_yaml_blocks(content)
+    for i, block in enumerate(yaml_blocks):
+        try:
+            yaml.safe_load(block)
+        except yaml.YAMLError as e:
+            return False, f"YAML block {i+1} parse error: {str(e)[:100]}"
+    
+    # Try to parse any JSON blocks
+    json_blocks = _extract_json_blocks(content)
+    for i, block in enumerate(json_blocks):
+        try:
+            json.loads(block)
+        except json.JSONDecodeError as e:
+            return False, f"JSON block {i+1} parse error: {str(e)[:100]}"
+    
+    return True, ""
+
+
+def _validate_decision_packet_content(content: str) -> Tuple[bool, str]:
+    """
+    Validate decision_packet artifact content.
+    
+    Checks:
+    1. Content is not empty
+    2. If structured (YAML/JSON), parse and check required keys
+    
+    Returns:
+        (is_valid, error_message)
+    """
+    if not content or not content.strip():
+        return False, "Decision packet content is empty"
+    
+    # Try to parse as YAML first (more permissive)
+    yaml_blocks = _extract_yaml_blocks(content)
+    json_blocks = _extract_json_blocks(content)
+    
+    # Check structured blocks for required keys
+    for block in yaml_blocks:
+        try:
+            data = yaml.safe_load(block)
+            if isinstance(data, dict):
+                missing_keys = [k for k in REQUIRED_DECISION_KEYS if k not in data]
+                if missing_keys:
+                    return False, f"Decision packet YAML missing keys: {', '.join(missing_keys)}"
+        except yaml.YAMLError as e:
+            return False, f"Decision packet YAML parse error: {str(e)[:100]}"
+    
+    for block in json_blocks:
+        try:
+            data = json.loads(block)
+            if isinstance(data, dict):
+                missing_keys = [k for k in REQUIRED_DECISION_KEYS if k not in data]
+                if missing_keys:
+                    return False, f"Decision packet JSON missing keys: {', '.join(missing_keys)}"
+        except json.JSONDecodeError as e:
+            return False, f"Decision packet JSON parse error: {str(e)[:100]}"
+    
+    # If no structured blocks, just ensure it has some content
+    # (for V0, we accept plain markdown decision packets)
+    return True, ""
+
+
+def validate_run_outputs(run_id: UUID) -> ValidationResult:
+    """
+    Validate run outputs before commit.
+    
+    Checks:
+    1. Synthesis artifact exists and is valid
+    2. Decision packet artifact exists and is valid
+    3. No critical errors that would prevent commit
+    
+    Args:
+        run_id: The run to validate
+        
+    Returns:
+        ValidationResult with is_valid, details, and failed_artifacts
+    """
+    from agentic_mvp_factory.repo import get_artifacts
+    
+    failed_artifacts = []
+    error_details = []
+    
+    # Get synthesis artifacts
+    synthesis_artifacts = get_artifacts(run_id, kind="synthesis")
+    if not synthesis_artifacts:
+        failed_artifacts.append("synthesis")
+        error_details.append("No synthesis artifact found")
+    else:
+        is_valid, error = _validate_synthesis_content(synthesis_artifacts[0].content)
+        if not is_valid:
+            failed_artifacts.append("synthesis")
+            error_details.append(f"Synthesis: {error}")
+    
+    # Get decision_packet artifacts
+    decision_artifacts = get_artifacts(run_id, kind="decision_packet")
+    if not decision_artifacts:
+        failed_artifacts.append("decision_packet")
+        error_details.append("No decision_packet artifact found")
+    else:
+        is_valid, error = _validate_decision_packet_content(decision_artifacts[0].content)
+        if not is_valid:
+            failed_artifacts.append("decision_packet")
+            error_details.append(f"Decision packet: {error}")
+    
+    # Build result
+    if failed_artifacts:
+        return ValidationResult(
+            is_valid=False,
+            details="; ".join(error_details),
+            failed_artifacts=failed_artifacts,
+        )
+    
+    return ValidationResult(
+        is_valid=True,
+        details="All outputs validated successfully",
+        failed_artifacts=[],
+    )
+
+
+def validate_content_standalone(
+    content: str,
+    content_type: str = "synthesis",
+) -> Tuple[bool, str]:
+    """
+    Validate content without database access (for testing).
+    
+    Args:
+        content: The content to validate
+        content_type: "synthesis" or "decision_packet"
+        
+    Returns:
+        (is_valid, error_message)
+    """
+    if content_type == "synthesis":
+        return _validate_synthesis_content(content)
+    elif content_type == "decision_packet":
+        return _validate_decision_packet_content(content)
+    else:
+        return False, f"Unknown content type: {content_type}"
+

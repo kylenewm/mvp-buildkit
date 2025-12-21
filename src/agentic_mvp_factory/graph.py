@@ -1,0 +1,596 @@
+"""LangGraph workflow for council runner.
+
+This module is designed to be importable standalone for LangGraph Studio.
+Usage:
+    from agentic_mvp_factory.graph import build_council_graph
+    graph = build_council_graph()
+
+Workflow: load_packet -> draft_generate -> critique_generate -> chair_synthesize -> pause_for_approval
+"""
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Any, List, Optional, Tuple
+from typing_extensions import TypedDict
+from uuid import UUID
+
+from langgraph.graph import StateGraph, END
+from langgraph.graph.state import CompiledStateGraph
+
+
+# =============================================================================
+# STATE DEFINITION (Studio-readable typed state)
+# =============================================================================
+
+class CouncilState(TypedDict, total=False):
+    """Typed state for the council workflow.
+    
+    All fields are explicit for LangGraph Studio inspection.
+    """
+    # Run context
+    run_id: str  # String for Studio readability
+    project_slug: str
+    
+    # Phase tracking (for Studio visibility)
+    phase: str  # created, loading, drafting, critiquing, synthesizing, waiting_for_approval, completed, failed
+    
+    # Configuration
+    models: List[str]
+    chair_model: str
+    
+    # Input
+    packet_path: str
+    packet_content: str
+    
+    # Artifact IDs (as strings for Studio readability)
+    packet_artifact_id: Optional[str]
+    draft_artifact_ids: List[str]
+    critique_artifact_ids: List[str]
+    synthesis_artifact_id: Optional[str]
+    decision_artifact_id: Optional[str]
+    
+    # Counts for Studio visibility
+    draft_count: int
+    critique_count: int
+    
+    # Error tracking
+    error: Optional[str]
+    failed_models: List[str]
+
+
+# =============================================================================
+# HELPER FUNCTIONS (not nodes)
+# =============================================================================
+
+def _update_run_status(run_id: str, status: str) -> None:
+    """Update the status of a run in the database."""
+    from agentic_mvp_factory.db import get_cursor
+    
+    with get_cursor() as cursor:
+        cursor.execute(
+            "UPDATE runs SET status = %s, updated_at = NOW() WHERE id = %s",
+            (status, run_id),
+        )
+
+
+def _generate_single_draft(
+    run_id: str,
+    model: str,
+    packet_content: str,
+) -> Tuple[str, Optional[str], Optional[str]]:
+    """Generate a single draft for one model.
+    
+    Returns:
+        Tuple of (model, artifact_id or None, error_message or None)
+    """
+    from agentic_mvp_factory.model_client import Message, get_openrouter_client, traced_complete
+    from agentic_mvp_factory.repo import write_artifact
+    
+    client = get_openrouter_client()
+    
+    system_prompt = """You are a council member reviewing a planning packet.
+Your job is to produce a concrete, implementable plan based on the packet's requirements.
+Be specific, actionable, and stay within the stated constraints.
+Output a coherent plan with clear sections."""
+    
+    messages = [
+        Message(role="system", content=system_prompt),
+        Message(role="user", content=f"## Planning Packet\n\n{packet_content}\n\n---\n\nProduce your implementation plan."),
+    ]
+    
+    try:
+        result = traced_complete(
+            client=client,
+            messages=messages,
+            model=model,
+            timeout=120.0,
+            phase="draft",
+            run_id=run_id,
+        )
+        
+        artifact = write_artifact(
+            run_id=UUID(run_id),
+            kind="draft",
+            content=result.content,
+            model=result.model,
+            usage_json=result.usage,
+        )
+        return (model, str(artifact.id), None)
+    except Exception as e:
+        write_artifact(
+            run_id=UUID(run_id),
+            kind="error",
+            content=f"Draft generation failed for {model}: {str(e)}",
+            model=model,
+        )
+        return (model, None, str(e))
+
+
+def _generate_single_critique(
+    run_id: str,
+    model: str,
+    drafts_text: str,
+) -> Tuple[str, Optional[str], Optional[str]]:
+    """Generate a single critique for one model.
+    
+    Returns:
+        Tuple of (model, artifact_id or None, error_message or None)
+    """
+    from agentic_mvp_factory.model_client import Message, get_openrouter_client, traced_complete
+    from agentic_mvp_factory.repo import write_artifact
+    
+    client = get_openrouter_client()
+    
+    system_prompt = """You are a council member critiquing implementation plans.
+Review all drafts and provide constructive critique:
+- Identify strengths and weaknesses
+- Note gaps or unclear areas
+- Suggest specific improvements
+- Flag any constraint violations
+Be direct and specific."""
+    
+    messages = [
+        Message(role="system", content=system_prompt),
+        Message(role="user", content=f"## Drafts to Critique\n{drafts_text}\n\nProvide your critique of these drafts."),
+    ]
+    
+    try:
+        result = traced_complete(
+            client=client,
+            messages=messages,
+            model=model,
+            timeout=120.0,
+            phase="critique",
+            run_id=run_id,
+        )
+        
+        artifact = write_artifact(
+            run_id=UUID(run_id),
+            kind="critique",
+            content=result.content,
+            model=result.model,
+            usage_json=result.usage,
+        )
+        return (model, str(artifact.id), None)
+    except Exception as e:
+        write_artifact(
+            run_id=UUID(run_id),
+            kind="error",
+            content=f"Critique generation failed for {model}: {str(e)}",
+            model=model,
+        )
+        return (model, None, str(e))
+
+
+# =============================================================================
+# NODE FUNCTIONS (semantic names for Studio)
+# =============================================================================
+
+def load_packet(state: CouncilState) -> CouncilState:
+    """Load the packet file and store as artifact."""
+    from agentic_mvp_factory.repo import write_artifact
+    
+    packet_path = state.get("packet_path", "")
+    run_id = state.get("run_id", "")
+    
+    # Handle missing required fields (e.g., when invoked from Studio)
+    if not packet_path:
+        return {
+            **state,
+            "phase": "failed",
+            "error": "packet_path is required",
+        }
+    if not run_id:
+        return {
+            **state,
+            "phase": "failed",
+            "error": "run_id is required",
+        }
+    
+    # Read packet content
+    path = Path(packet_path)
+    if not path.exists():
+        return {
+            **state,
+            "phase": "failed",
+            "error": f"Packet file not found: {packet_path}",
+        }
+    
+    content = path.read_text()
+    
+    # Store as artifact
+    artifact = write_artifact(
+        run_id=UUID(run_id),
+        kind="packet",
+        content=content,
+        model=None,
+    )
+    
+    return {
+        **state,
+        "phase": "loading",
+        "packet_content": content,
+        "packet_artifact_id": str(artifact.id),
+    }
+
+
+def draft_generate(state: CouncilState) -> CouncilState:
+    """Generate drafts from all models in parallel."""
+    run_id = state.get("run_id", "")
+    models = state.get("models", [])
+    packet_content = state.get("packet_content", "")
+    
+    # Handle missing required fields
+    if not run_id or not models or not packet_content:
+        return {
+            **state,
+            "phase": "failed",
+            "error": "Missing required state: run_id, models, or packet_content",
+        }
+    
+    # Update status
+    _update_run_status(run_id, "drafting")
+    
+    draft_ids: List[str] = []
+    failed_models: List[str] = []
+    
+    # Run drafts in parallel
+    with ThreadPoolExecutor(max_workers=len(models)) as executor:
+        futures = {
+            executor.submit(_generate_single_draft, run_id, model, packet_content): model
+            for model in models
+        }
+        
+        for future in as_completed(futures):
+            model, artifact_id, error = future.result()
+            if artifact_id:
+                draft_ids.append(artifact_id)
+            else:
+                failed_models.append(model)
+    
+    # Check if we have enough drafts to continue
+    if len(draft_ids) < 2:
+        error_msg = f"Only {len(draft_ids)} draft(s) succeeded. Need at least 2. Failed: {failed_models}"
+        _update_run_status(run_id, "failed")
+        return {
+            **state,
+            "phase": "failed",
+            "error": error_msg,
+            "draft_artifact_ids": draft_ids,
+            "draft_count": len(draft_ids),
+            "failed_models": failed_models,
+        }
+    
+    return {
+        **state,
+        "phase": "drafting",
+        "draft_artifact_ids": draft_ids,
+        "draft_count": len(draft_ids),
+        "failed_models": failed_models,
+    }
+
+
+def critique_generate(state: CouncilState) -> CouncilState:
+    """Generate critiques from all models in parallel (each critiques all drafts)."""
+    from agentic_mvp_factory.repo import get_artifacts
+    
+    run_id = state.get("run_id", "")
+    models = state.get("models", [])
+    failed_models = list(state.get("failed_models", []))
+    
+    # Handle missing required fields
+    if not run_id or not models:
+        return {
+            **state,
+            "phase": "failed",
+            "error": "Missing required state: run_id or models",
+        }
+    
+    # Update status
+    _update_run_status(run_id, "critiquing")
+    
+    # Fetch all drafts
+    drafts = get_artifacts(UUID(run_id), kind="draft")
+    if not drafts:
+        return {
+            **state,
+            "phase": "failed",
+            "error": "No drafts to critique",
+        }
+    
+    # Format drafts for critique
+    drafts_text = ""
+    for i, draft in enumerate(drafts, 1):
+        drafts_text += f"\n## Draft {i} (from {draft.model})\n\n{draft.content}\n\n---\n"
+    
+    critique_ids: List[str] = []
+    
+    # Run critiques in parallel
+    with ThreadPoolExecutor(max_workers=len(models)) as executor:
+        futures = {
+            executor.submit(_generate_single_critique, run_id, model, drafts_text): model
+            for model in models
+        }
+        
+        for future in as_completed(futures):
+            model, artifact_id, error = future.result()
+            if artifact_id:
+                critique_ids.append(artifact_id)
+            else:
+                if model not in failed_models:
+                    failed_models.append(model)
+    
+    return {
+        **state,
+        "phase": "critiquing",
+        "critique_artifact_ids": critique_ids,
+        "critique_count": len(critique_ids),
+        "failed_models": failed_models,
+    }
+
+
+def chair_synthesize(state: CouncilState) -> CouncilState:
+    """Chair synthesizes drafts and critiques into final plan + decision packet."""
+    from agentic_mvp_factory.model_client import Message, get_openrouter_client, traced_complete
+    from agentic_mvp_factory.repo import get_artifacts, write_artifact
+    
+    run_id = state.get("run_id", "")
+    chair_model = state.get("chair_model", "")
+    packet_content = state.get("packet_content", "")
+    
+    # Handle missing required fields
+    if not run_id or not chair_model:
+        return {
+            **state,
+            "phase": "failed",
+            "error": "Missing required state: run_id or chair_model",
+        }
+    
+    # Update status
+    _update_run_status(run_id, "synthesizing")
+    
+    # Fetch drafts and critiques
+    drafts = get_artifacts(UUID(run_id), kind="draft")
+    critiques = get_artifacts(UUID(run_id), kind="critique")
+    
+    # Format for chair
+    drafts_text = ""
+    for i, draft in enumerate(drafts, 1):
+        drafts_text += f"\n### Draft {i} (from {draft.model})\n\n{draft.content}\n\n---\n"
+    
+    critiques_text = ""
+    for i, critique in enumerate(critiques, 1):
+        critiques_text += f"\n### Critique {i} (from {critique.model})\n\n{critique.content}\n\n---\n"
+    
+    client = get_openrouter_client()
+    
+    # Synthesis prompt
+    synthesis_system = """You are the Chair of a multi-model council.
+Synthesize the drafts and critiques into a single, coherent implementation plan.
+
+Rules:
+- Do not average into mush; pick a direction and justify it
+- If council is split, choose one approach and explain the tradeoff
+- Be concrete and actionable
+- Stay within V0 constraints
+
+Output two sections:
+1. SYNTHESIS: The final unified plan
+2. DECISION_PACKET: A compact summary with key decisions, next actions, and risks"""
+    
+    messages = [
+        Message(role="system", content=synthesis_system),
+        Message(
+            role="user",
+            content=f"""## Original Packet
+{packet_content}
+
+## Council Drafts
+{drafts_text}
+
+## Council Critiques
+{critiques_text}
+
+---
+
+Produce your synthesis and decision packet.""",
+        ),
+    ]
+    
+    try:
+        result = traced_complete(
+            client=client,
+            messages=messages,
+            model=chair_model,
+            timeout=180.0,
+            phase="chair",
+            run_id=run_id,
+        )
+        
+        # Store synthesis
+        synthesis_artifact = write_artifact(
+            run_id=UUID(run_id),
+            kind="synthesis",
+            content=result.content,
+            model=result.model,
+            usage_json=result.usage,
+        )
+        
+        # Extract decision packet if present, otherwise duplicate synthesis
+        content = result.content
+        decision_content = content
+        if "DECISION_PACKET" in content:
+            parts = content.split("DECISION_PACKET")
+            if len(parts) > 1:
+                decision_content = "DECISION_PACKET" + parts[-1]
+        
+        decision_artifact = write_artifact(
+            run_id=UUID(run_id),
+            kind="decision_packet",
+            content=decision_content,
+            model=result.model,
+        )
+        
+        return {
+            **state,
+            "phase": "synthesizing",
+            "synthesis_artifact_id": str(synthesis_artifact.id),
+            "decision_artifact_id": str(decision_artifact.id),
+        }
+        
+    except Exception as e:
+        write_artifact(
+            run_id=UUID(run_id),
+            kind="error",
+            content=f"Chair synthesis failed: {str(e)}",
+            model=chair_model,
+        )
+        _update_run_status(run_id, "failed")
+        return {
+            **state,
+            "phase": "failed",
+            "error": str(e),
+        }
+
+
+def pause_for_approval(state: CouncilState) -> CouncilState:
+    """Pause the workflow for human approval (HITL checkpoint)."""
+    run_id = state.get("run_id", "")
+    
+    if not run_id:
+        return {
+            **state,
+            "phase": "failed",
+            "error": "Missing required state: run_id",
+        }
+    
+    # Update status to waiting_for_approval
+    _update_run_status(run_id, "waiting_for_approval")
+    
+    return {
+        **state,
+        "phase": "waiting_for_approval",
+    }
+
+
+# =============================================================================
+# GRAPH CONSTRUCTION (Studio-compatible)
+# =============================================================================
+
+def build_council_graph() -> CompiledStateGraph:
+    """Build the council workflow graph.
+    
+    This function is designed to be called standalone by LangGraph Studio.
+    No CLI context, no sys.exit, no implicit environment reads.
+    
+    Returns:
+        CompiledGraph ready for invocation or Studio inspection.
+    """
+    # Create graph with typed state
+    graph = StateGraph(CouncilState)
+    
+    # Add nodes with semantic names
+    graph.add_node("load_packet", load_packet)
+    graph.add_node("draft_generate", draft_generate)
+    graph.add_node("critique_generate", critique_generate)
+    graph.add_node("chair_synthesize", chair_synthesize)
+    graph.add_node("pause_for_approval", pause_for_approval)
+    
+    # Define edges
+    graph.set_entry_point("load_packet")
+    graph.add_edge("load_packet", "draft_generate")
+    graph.add_edge("draft_generate", "critique_generate")
+    graph.add_edge("critique_generate", "chair_synthesize")
+    graph.add_edge("chair_synthesize", "pause_for_approval")
+    graph.add_edge("pause_for_approval", END)
+    
+    return graph.compile()
+
+
+# =============================================================================
+# CLI RUNNER (kept separate from graph construction)
+# =============================================================================
+
+def run_council(
+    project_slug: str,
+    packet_path: str,
+    models: List[str],
+    chair_model: str,
+    on_progress: Optional[callable] = None,
+) -> Tuple[str, List[str]]:
+    """
+    Run the council workflow (CLI entrypoint).
+    
+    Args:
+        project_slug: Project namespace
+        packet_path: Path to the planning packet
+        models: List of model IDs to use for drafts/critiques
+        chair_model: Model ID for chair synthesis
+        on_progress: Optional callback for progress updates
+    
+    Returns:
+        Tuple of (run_id as string, list of failed models)
+    """
+    from agentic_mvp_factory.repo import create_run
+    
+    # Create run
+    run = create_run(project_slug=project_slug, task_type="plan")
+    run_id_str = str(run.id)
+    
+    # Build initial state
+    initial_state: CouncilState = {
+        "run_id": run_id_str,
+        "project_slug": project_slug,
+        "phase": "created",
+        "models": models,
+        "chair_model": chair_model,
+        "packet_path": packet_path,
+        "packet_content": "",
+        "packet_artifact_id": None,
+        "draft_artifact_ids": [],
+        "critique_artifact_ids": [],
+        "synthesis_artifact_id": None,
+        "decision_artifact_id": None,
+        "draft_count": 0,
+        "critique_count": 0,
+        "error": None,
+        "failed_models": [],
+    }
+    
+    # Build and run graph
+    graph = build_council_graph()
+    
+    # Run the graph
+    final_state = graph.invoke(initial_state)
+    
+    failed_models = final_state.get("failed_models", [])
+    
+    return run_id_str, failed_models
+
+
+# =============================================================================
+# STANDALONE GRAPH INSTANCE (for LangGraph Studio)
+# =============================================================================
+
+# This allows Studio to import and visualize the graph directly
+graph = build_council_graph()

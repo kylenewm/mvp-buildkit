@@ -1,0 +1,193 @@
+schema_version: 0.1
+updated_at: 2025-12-20
+project_slug: agentic-mvp-factory
+tracker_name: factory_tracker_v0
+
+status_legend:
+  - todo
+  - doing
+  - blocked
+  - done
+
+defaults:
+  proof_required: true
+  commit_required: true
+
+steps:
+  - id: S01
+    title: Repo scaffold and CLI skeleton
+    status: todo
+    intent: >
+      Create the project structure and a working CLI entrypoint that loads config
+      and can run basic commands without implementing orchestration yet.
+    deliverables:
+      - "pyproject.toml (or requirements.txt) + basic packaging"
+      - "src/agentic_mvp_factory/cli.py (or equivalent)"
+      - ".env.example with DATABASE_URL and OPENROUTER_API_KEY"
+      - "Makefile/justfile optional: dev commands"
+    acceptance:
+      - "Running `council --help` works"
+      - "Running `council init --repo <path>` creates expected folders"
+      - "Config loads and errors clearly if env vars missing"
+    proof:
+      - "Paste terminal output of help + init into the run notes or a proof file"
+    notes: ""
+
+  - id: S02
+    title: Postgres schema and local dev database
+    status: todo
+    intent: >
+      Define minimal tables (runs, artifacts, approvals) and provide a local
+      Postgres dev story, while remaining compatible with Railway DATABASE_URL.
+    deliverables:
+      - "docker-compose.yml for local Postgres"
+      - "SQL migration files OR Alembic migrations (pick one)"
+      - "db init command in CLI: `council db init` (optional but recommended)"
+      - "Repository layer: create_run, write_artifact, list_runs"
+    acceptance:
+      - "Local Postgres can be started with one command"
+      - "Schema can be created from scratch reliably"
+      - "CLI can create a run row and store a packet artifact"
+    proof:
+      - "Terminal output showing DB up + schema created + run inserted"
+    notes: ""
+
+  - id: S03
+    title: OpenRouter ModelClient (single call)
+    status: todo
+    intent: >
+      Implement ModelClient + OpenRouter client that can execute one prompt and store
+      the response as an artifact, including usage metadata when available.
+    deliverables:
+      - "ModelClient interface"
+      - "OpenRouterClient with configurable model name"
+      - "Artifacts store: kind=draft (or test kind) with model field"
+      - "Basic timeout support"
+    acceptance:
+      - "CLI can run a test call: `council model test --model <id>`"
+      - "Response content stored in artifacts table"
+      - "usage_json stored when returned"
+    proof:
+      - "DB row(s) visible for the artifact; terminal output confirming success"
+    notes: ""
+
+  - id: S04
+    title: LangGraph wiring (linear, no interrupt yet)
+    status: todo
+    intent: >
+      Create the LangGraph graph with nodes that run sequentially first:
+      load_packet -> draft -> critique -> chair_synthesis, storing artifacts at each step.
+    deliverables:
+      - "graph.py defining state + nodes"
+      - "Runner entrypoint invoked by CLI: `council run plan ...`"
+      - "Artifacts written for packet, drafts, critiques, synthesis, decision_packet"
+    acceptance:
+      - "A run produces all expected artifacts for 2+ models"
+      - "Run status transitions through drafting/critique/synthesis"
+    proof:
+      - "CLI `council show <run_id> --section all` displays stored artifacts"
+    notes: ""
+
+  - id: S05
+    title: Parallel drafts + parallel critiques
+    status: todo
+    intent: >
+      Update graph to run drafts in parallel and critiques in parallel
+      (each model critiques all drafts).
+    deliverables:
+      - "Parallel execution for draft phase"
+      - "Parallel execution for critique phase"
+      - "Critique topology: one critique per model referencing all drafts"
+    acceptance:
+      - "3-model run produces 3 drafts + 3 critiques"
+      - "Artifacts are consistently associated with the correct model"
+    proof:
+      - "Show artifact counts and sample critique output"
+    notes: ""
+
+  - id: S06
+    title: HITL approval interrupt + resume across CLI sessions
+    status: todo
+    intent: >
+      Add the interrupt after chair_synthesis and implement CLI approve/edit/reject
+      that resumes the workflow using persisted state.
+    deliverables:
+      - "interrupt node returning payload"
+      - "CLI: `council approve <run_id>` with approve/edit/reject"
+      - "edit+approve opens $EDITOR and stores edited text"
+      - "Reject triggers NEW run_id with parent_run_id link (optional but preferred)"
+    acceptance:
+      - "Run pauses at waiting_for_approval"
+      - "You can close terminal and later approve and resume"
+      - "approve leads to commit stage (even if commit is stubbed initially)"
+      - "reject creates a new run and restarts with appended feedback"
+    proof:
+      - "Terminal transcripts demonstrating pause + resume"
+    notes: ""
+
+  - id: S07
+    title: Precommit minimal validation
+    status: todo
+    intent: >
+      Before writing files, validate that generated outputs parse and contain required keys.
+      Keep validation minimal for V0.
+    deliverables:
+      - "Validator module for YAML/JSON parse + required keys"
+      - "Validation errors stored as error artifacts"
+    acceptance:
+      - "Invalid output prevents commit and clearly reports why"
+      - "Valid output proceeds to commit"
+    proof:
+      - "One negative test case + one positive case"
+    notes: ""
+
+  - id: S08
+    title: Commit outputs to repo (stable paths + snapshot versions)
+    status: todo
+    intent: >
+      Implement repo writer that writes the Phase-2 artifact pack stubs into target repo,
+      and also snapshots written files into versions/<timestamp>_<run_id>/.
+    deliverables:
+      - "Repo writer module"
+      - "Outputs generated on commit (spec, tracker, invariants, cursor rules, prompts, build guide)"
+      - "Commit manifest artifact stored in Postgres"
+    acceptance:
+      - "Running commit writes stable paths"
+      - "Snapshot folder created with copies of written files"
+      - "Commit manifest lists all files written"
+    proof:
+      - "Directory tree output + manifest content"
+    notes: ""
+
+  - id: S09
+    title: CLI ergonomics (status, show, paging, open)
+    status: todo
+    intent: >
+      Make the CLI usable daily: summaries, sections, and editor-friendly output.
+    deliverables:
+      - "`council status` supports --project filter"
+      - "`council show` supports --section and --open"
+      - "Reasonable default summary output"
+    acceptance:
+      - "You can quickly find runs waiting for approval"
+      - "You can view only synthesis or only drafts without noise"
+    proof:
+      - "Terminal output screenshots/transcripts"
+    notes: ""
+
+  - id: S10
+    title: Dogfood run on the factory itself
+    status: todo
+    intent: >
+      Use the runner to generate an implementation plan and commit a starter artifact pack
+      for the next iteration of the factory (or a toy project).
+    deliverables:
+      - "At least one complete run with 3 models"
+      - "Approved synthesis"
+      - "Committed artifact pack into a repo path"
+    acceptance:
+      - "End-to-end loop works without manual DB edits"
+      - "Artifacts are useful enough to drive real Cursor work"
+    proof:
+      - "Run_id + outputs folder created"
+    notes: ""
