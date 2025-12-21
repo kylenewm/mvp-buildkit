@@ -97,6 +97,7 @@ def write_execution_report(
 def run_step(
     step_file: Path,
     output_dir: Optional[Path] = None,
+    use_graph: bool = True,
 ) -> ExecutionState:
     """
     Main entry point: load step, run execution loop, write report.
@@ -104,6 +105,7 @@ def run_step(
     Args:
         step_file: Path to step definition (YAML or JSON)
         output_dir: Directory for execution reports (default: ./execution/reports/)
+        use_graph: If True, use LangGraph for tracing visibility (default: True)
     
     Returns:
         Final ExecutionState
@@ -114,17 +116,24 @@ def run_step(
     # Load step definition
     step_def = load_step_definition(step_file)
     
-    # Build execution state
-    state = build_execution_state(step_def)
-    
     # Get model client
     client = get_openrouter_client()
     
     # Record start time
     start_time = datetime.now()
     
-    # Run execution loop
-    final_state = run_execution_loop(state, client)
+    # Run execution - with or without graph tracing
+    if use_graph:
+        from agentic_mvp_factory.execution_graph import run_execution_graph
+        final_state = run_execution_graph(
+            task_id=step_def["task_id"],
+            file_path=step_def["file_path"],
+            model_client=client,
+            max_retries=step_def.get("max_retries", 1),
+        )
+    else:
+        state = build_execution_state(step_def)
+        final_state = run_execution_loop(state, client)
     
     # Record end time
     end_time = datetime.now()

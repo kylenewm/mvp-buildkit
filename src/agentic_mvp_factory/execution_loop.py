@@ -80,8 +80,8 @@ def refactor_node(state: ExecutionState, model_client) -> ExecutionState:
 ERROR:
 {state.last_stderr}"""
     
-    # Call the model
-    from agentic_mvp_factory.model_client import Message
+    # Call the model with tracing
+    from agentic_mvp_factory.model_client import Message, traced_complete
     from agentic_mvp_factory.constants import DEFAULT_CHAIR_MODEL
     
     messages = [
@@ -89,7 +89,13 @@ ERROR:
         Message(role="user", content=user_prompt),
     ]
     
-    result = model_client.complete(messages=messages, model=DEFAULT_CHAIR_MODEL)
+    result = traced_complete(
+        client=model_client,
+        messages=messages,
+        model=DEFAULT_CHAIR_MODEL,
+        phase="refactor",
+        run_id=state.task_id,
+    )
     
     # Extract code from response (strip markdown fences if present)
     fixed_code = result.content

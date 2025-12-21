@@ -897,10 +897,18 @@ def extract(run_id: str, slug: str, execution_dir: str):
     default="execution/reports",
     help="Directory for execution reports (default: execution/reports)",
 )
-def exec_step(step_file: str, output_dir: str):
+@click.option(
+    "--no-trace",
+    is_flag=True,
+    help="Disable LangGraph tracing (run without graph wrapper)",
+)
+def exec_step(step_file: str, output_dir: str, no_trace: bool):
     """Execute a single step definition file.
     
     STEP_FILE: Path to step definition (YAML or JSON)
+    
+    By default, uses LangGraph for tracing visibility in Studio.
+    Use --no-trace to run without the graph wrapper.
     
     Step definition format:
     
@@ -916,10 +924,12 @@ def exec_step(step_file: str, output_dir: str):
     out_path = Path(output_dir).resolve()
     
     click.echo(f"Executing step: {step_path}")
+    if not no_trace:
+        click.echo(f"  (LangGraph tracing enabled)")
     click.echo()
     
     try:
-        final_state = run_step(step_path, out_path)
+        final_state = run_step(step_path, out_path, use_graph=not no_trace)
         
         if final_state.status == "SUCCESS":
             raise SystemExit(0)
@@ -973,6 +983,37 @@ def review_step(report_file: str, delta_dir: str):
     except Exception as e:
         click.echo(f"Unexpected error: {e}", err=True)
         raise SystemExit(1)
+
+
+@cli.command("observe")
+@click.argument("task_id")
+@click.option(
+    "--reports-dir",
+    type=click.Path(),
+    default="execution/reports",
+    help="Directory for execution reports",
+)
+@click.option(
+    "--deltas-dir",
+    type=click.Path(),
+    default="execution/deltas",
+    help="Directory for delta files",
+)
+def observe_task(task_id: str, reports_dir: str, deltas_dir: str):
+    """Show a summary of a task's execution history.
+    
+    TASK_ID: The task identifier to observe
+    
+    Read-only. Displays execution reports and review decisions.
+    """
+    from pathlib import Path
+    from agentic_mvp_factory.observe import print_summary
+    
+    print_summary(
+        task_id=task_id,
+        reports_dir=Path(reports_dir),
+        deltas_dir=Path(deltas_dir),
+    )
 
 
 if __name__ == "__main__":

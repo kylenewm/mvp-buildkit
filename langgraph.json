@@ -2,7 +2,8 @@
   "python_version": "3.11",
   "dependencies": ["."],
   "graphs": {
-    "council": "./src/agentic_mvp_factory/graph.py:graph"
+    "council": "./src/agentic_mvp_factory/graph.py:graph",
+    "execution": "./src/agentic_mvp_factory/execution_graph.py:execution_graph"
   },
   "env": ".env"
 }
