@@ -1,0 +1,31 @@
+{
+  "run_id": "50ef33d8-ced0-4f48-8338-d617831ec7b9",
+  "timestamp": "20251224_153558",
+  "stable_paths_written": [
+    "spec/spec.yaml",
+    "tracker/tracker.yaml",
+    "invariants/invariants.md",
+    ".cursor/rules/00_global.md",
+    ".cursor/rules/10_invariants.md",
+    "prompts/step_template.md",
+    "prompts/patch_template.md",
+    "prompts/hotfix_sync.md",
+    "prompts/review_template.md",
+    "prompts/chair_synthesis_template.md",
+    "docs/build_guide.md"
+  ],
+  "snapshot_path": "versions/20251224_153558_50ef33d8-ced0-4f48-8338-d617831ec7b9",
+  "file_hashes": {
+    "spec/spec.yaml": "7fe8b8b86244c259e79f82451318e0af02be7ca8e2826fb208d5b91e0182b438",
+    "tracker/tracker.yaml": "91d8eda225803ccecf13582caaf7bbb4ba45e981fb72d02dd9d52f22b1546f0c",
+    "invariants/invariants.md": "00bd2d4d3f61cb889d48abc6d8737257cc2dee1d1a38aea6d6e7ca1b67e75e14",
+    ".cursor/rules/00_global.md": "a138b14c3e02c0945c32dafe9c7a75d0f1cfdfce5901f6f8d89763bf3d5a0bc2",
+    ".cursor/rules/10_invariants.md": "059fed32eae6b8408d1cfad4bf93defc1ba9e899e65d4d4a2c3626580668e636",
+    "prompts/step_template.md": "9b0e82a97827fbc047f75d2db80cabd17c06c27a9c5eb14f6b0af7bc06fba24f",
+    "prompts/patch_template.md": "d4e9873f09eeb984f23e4ca917b5fc7046672f5723b7edb0d3d4f0d54a00ccfa",
+    "prompts/hotfix_sync.md": "5960377e1da3b94e1dbc0f5d9013c23bfc739fc41c0a15b98a382faf60b57fc5",
+    "prompts/review_template.md": "443515d65b695c660429950d9523e9993d43369f47c5c18d13c10e38d0701d02",
+    "prompts/chair_synthesis_template.md": "b9df6199a26a6c6ed2b26fcb59993cc4896a70769a02bfef05f048134955f183",
+    "docs/build_guide.md": "7e6caf73316b30fa8a5dab3671a7417176d398d84a0cc2c221377c68006d7db2"
+  }
+}

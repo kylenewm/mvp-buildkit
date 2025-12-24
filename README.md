@@ -1,421 +1,324 @@
-# MVP Buildkit
+# Agentic MVP Factory (V0) — CLI Council Runner
 
-A **state-first workflow** for building MVPs with AI-assisted development.
-
-This system addresses the core failure modes of "chatbot coding"—context drift, hallucinated verifications, architectural entropy—by treating human intent as something that can be **compiled into machine-validated artifacts** and executed with runtime proof.
-
----
-
-## The Problem
-
-Current AI-assisted development is held together with tape:
-
-* **Context disappears** between sessions
-* **Specs exist only in your head** (or rot in outdated docs)
-* **"It works" means "it ran once"** with no verification trail
-* **Manual fixes poison future automation** because the system doesn't know what you did
-
-This compounds. By day three of an MVP build, the AI is working against an outdated mental model and you're spending more time re-explaining than building.
+A **CLI-first, stateful “council runner”** that helps you turn a scoped build intent into:
+1) a multi-model plan you can approve,
+2) a **canonical artifact pack** (spec, tracker, prompts, Cursor rules, invariants) you can approve,
+3) a **package you can unzip into Cursor** to execute steps with tight constraints and proof.
 
 ---
 
-## The Solution
+## What V0 is (and is not)
 
-A governed development pipeline where:
+### ✅ V0 provides
+- **Phase -1**: Build commitment + bounded research snapshot (small, reviewable)
+- **Phase 0 (Lite)**: Context pack (human-authored or lightly assisted) used as input to planning
+- **Phase 1**: Multi-model planning council (drafts → critiques → chair synthesis) + **HITL approval**
+- **Phase 2**: **Artifact-generation councils**, one artifact at a time, each with **HITL approval**
+- **Commit**: Writes stable canonical files + snapshots versioned output
+- **Provenance**: Run IDs, stored artifacts, and optional LangSmith traces
 
-1. **Intent becomes structured state** (`spec.yaml`) grounded by real research
-2. **State compiles into execution artifacts** (tracker, invariants, rules, prompt-docs, verification harness)
-3. **Execution produces runtime proof** (test results, sentinel scans, verification packets)
-4. **Proof gates progression**—no "trust me, it works"
-5. **Manual work syncs back** instead of creating invisible drift
+### ❌ V0 does NOT provide
+- Web UI (CLI only)
+- Fully autonomous building or execution without approval
+- Heavy governance, sentinel enforcement, or “self-healing”
+- Deep research automation as a default (see “Deep Research (planned)”)
 
 ---
 
-## System Architecture
+## Core design principles
 
+- **State-first**: runs + artifacts are persisted (Postgres)
+- **Small artifacts**: size caps + schema validation before downstream phases
+- **One decision at a time**: Phase 2 generates artifacts sequentially; you approve each before continuing
+- **Canonical until regenerated**: committed artifacts stay canonical until you explicitly regenerate
+- **No surprise refactors**: patch-only behavior is enforced by rules + invariants
+
+---
+
+## High-level flow (end-to-end)
+
+### Execution order (what happens, in order)
+1. **Phase -1: Commit the build**
+   - Fill `phase_minus_1/build_candidate.yaml`
+   - Fill `phase_minus_1/research_snapshot.yaml` (can be light)
+   - Run guard → produce exception packet → **HITL: commit build + research sufficiency**
+2. **Phase 0 (Lite): Context Pack**
+   - Create/update `phase_0/context_pack_lite.md` (or equivalent)
+   - This is the “injectable context” for planning prompts (bounded; not a dump)
+3. **Phase 1: Planning council**
+   - 3 models draft
+   - 3 models critique
+   - Chair synthesizes one plan
+   - **HITL: approve/edit/reject** the plan
+   - The approved plan becomes the **canonical “plan” artifact**
+4. **Phase 2: Artifact councils (sequential, one-at-a-time)**
+   - For each artifact (spec → tracker → prompts → Cursor rules → invariants):
+     - Council drafts that artifact
+     - Chair synthesizes a single candidate
+     - **HITL: approve/edit/reject**
+     - Approved result becomes canonical (until regenerated)
+5. **Commit / Export**
+   - Write canonical artifact pack into stable repo paths
+   - Snapshot to `versions/<timestamp>_<run_id>/`
+   - (Planned) export a **zip pack** you can unzip in Cursor for execution
+
+### Diagram (V0)
 ```mermaid
-flowchart TB
-  U[Human Intent] --> P0
-  EXT[External Research] --> P0
-
-  subgraph P0[Phase 0: Intent + Context Baseline]
-    P0A[Question Funnel] --> P0B[Context Pack + Evidence Ledger]
-    P0B --> P0C[spec/spec.yaml]
-    P0C --> SG0[State Guard]
-  end
-
-  P0 --> P1
-  subgraph P1[Phase 1: Planning Council]
-    PR[Planning Router] --> D1A[Plan Drafts]
-    D1A --> CR[Critique Round]
-    CR --> CH[Chair Synthesis]
-    CH --> PV1[plan/plan_v1.yaml]
-    CH --> DEC[decision_delta.json]
-    PV1 --> SG1[State Guard]
-  end
-
-  P1 --> P2
-  subgraph P2[Phase 2: Artifact Compiler]
-    PV1 --> T2[tracker/tracker.yaml]
-    PV1 --> INV[invariants.yaml]
-    PV1 --> RULES[rules.yaml + .cursor/rules]
-    PV1 --> VERIF[golden_commands.yaml + harness]
-    PV1 --> SENT[sentinel_rules.yaml]
-    T2 --> ALIGN[Alignment Checks]
-    ALIGN --> SG2[State Guard]
-    SG2 --> PACK[Artifact Pack v1]
-  end
-
-  PACK --> P3
-  subgraph P3[Phase 3: Execution Loop]
-    TRSEL[Pick next step] --> STEP[Step Prompt-doc]
-    STEP --> PROOF[Verification Packet]
-    PROOF --> SENTRUN[Sentinel Scan]
-    SENTRUN --> REVIEW[Review Prompt-doc]
-    REVIEW --> V{Verdict}
-    V -->|FAIL| PATCH[Patch Prompt-doc]
-    PATCH --> PROOF
-    V -->|PASS| DELTA[Build Reality Delta]
-    DELTA --> TRUP[Update tracker]
-    TRUP --> TRSEL
-  end
-
-  P3 -->|Stuck or drift| P4
-  subgraph P4[Phase 4: Surgical Refactor]
-    RB[Refactor Brief] --> RP[Minimal Patch Plan]
-    RP --> P3
-  end
-
-  P3 -->|Manual or hotfix| P5
-  subgraph P5[Phase 5: Manual + Post-hoc Sync]
-    IN[Intent Note] --> MAN[Manual changes]
-    MAN --> SYNC[Sync Agent]
-    SYNC --> P3
-  end
-```
+flowchart TD
+  A[Phase -1: build_candidate.yaml + research_snapshot.yaml] --> B{Guard + HITL}
+  B -->|approved| C[Phase 0 Lite: context_pack_lite.md]
+  C --> D[Phase 1: Plan Council\nDrafts -> Critiques -> Chair]
+  D --> E{HITL: Plan approve/edit/reject}
+  E -->|approved| F[Phase 2: Artifact Council (sequential)\nSpec -> Tracker -> Prompts -> Cursor Rules -> Invariants]
+  F --> G{HITL per artifact}
+  G -->|approved all| H[Commit: write canonical files + snapshot]
+  H --> I[(Planned) Export: zip artifact pack for Cursor]
+````
 
 ---
 
-## Core Concepts
+## Canonical artifacts (source of truth)
 
-### Canonical State (Source of Truth)
+These are the **stable, canonical** files the system writes and future runs reference.
 
-These files govern planning and execution. They're **patch-only**—no wholesale rewrites allowed:
+### Specification & planning
 
-| File | Purpose |
-|------|---------|
-| spec/spec.yaml | Structured intent: user, wow slice, constraints, decisions |
-| plan/plan_v1.yaml | Architecture + milestones + risk assessment |
-| tracker/tracker.yaml | Step DAG with dependencies, status, proof requirements |
-| invariants/invariants.yaml | Contracts that must never be violated |
-| rules/rules.yaml | Operating policies for execution |
+* `spec/spec.yaml` — project spec, constraints, outputs
+* `tracker/tracker.yaml` — step tracker used for execution
+* `invariants/invariants.md` — non-negotiable contracts
 
-### State Guard
+### Cursor rules
 
-Every write to canonical state must pass validation:
-* Schema compliance
-* No forbidden overwrites
-* Cross-file consistency (e.g., tracker steps reference valid invariants)
-* Version bump rules
+* `.cursor/rules/00_global.md` — global behavior constraints
+* `.cursor/rules/10_invariants.md` — invariant quick-reference (no duplication of definitions)
 
-### Verification Levels
+### Prompt templates
 
-* `human_only` — Manual inspection sufficient
-* `hybrid` — Some automated, some manual
-* `machine_required` — Must have passing tests/commands
+* `prompts/chair_synthesis_template.md`
+* `prompts/step_template.md`
+* `prompts/review_template.md`
+* `prompts/patch_template.md`
 
-High-risk surfaces (auth, payments, data, secrets) default to `machine_required`.
+### Phase -1 artifacts
 
-### Binary-First Sentinel
+* `phase_minus_1/build_candidate.yaml`
+* `phase_minus_1/research_snapshot.yaml`
+* `schemas/build_candidate.schema.json`
+* `schemas/research_snapshot.schema.json`
 
-Sentinel **blocks only on deterministic matches**: exposed secrets, auth bypass patterns, destructive DB operations, disabled tests. Minimizes false positives.
+### Generated (not canonical)
 
-### Exception-Based Human Review
-
-You review only exceptions: split votes, decision changes, new dependencies, proof overrides, sentinel blocks, repeated failures. Everything else flows.
-
-### Optimistic Concurrency
-
-Every canonical file has `state_version`. Patches include `base_state_version`. Conflicts get "rebase required" instead of silent overwrites.
-
-### Golden Command Registry
-
-Verification uses only registered commands. The executor cannot invent substitute commands and call it "proof."
+* `phase_minus_1/exception_packet.md`
+* `versions/<timestamp>_<run_id>/...`
+* `COMMIT_MANIFEST.md`
+* execution logs / reports
 
 ---
 
-## Operating Modes
+## Quickstart (V0)
 
-### Normal Mode
+### Prereqs
 
-Planned work through the full pipeline. Most builds happen here.
+* Python environment
+* Postgres URL (local or Railway-style)
+* OpenRouter API key
+* (Optional) LangSmith env vars for tracing
 
-### Hotfix Mode
+### Environment variables
 
-Manual edits when you need to ship now. Required afterward:
+* `DATABASE_URL`
+* `OPENROUTER_API_KEY`
 
-* Intent note (what/why)
-* Proof packet (run the harness)
-* Sentinel scan
-* Sync delta back to canonical state
+### Typical run (minimal)
 
-### Refactor Mode
-
-Triggered by repeated failures or architectural mismatch. Produces a minimal patch plan, then returns to normal execution.
-
----
-
-## Directory Structure
-
-```
-research/
-  research_intake.yaml              # What to research
-  query_plan.yaml                   # Search strategy
-  runs/<run_id>/
-    evidence_ledger.yaml            # Claims with durable pointers
-    synthesis_final.md              # Research report with citations
-
-spec/
-  spec.yaml                         # Canonical structured spec
-
-plan/
-  plan_v1.yaml                      # Canonical plan
-  decision_delta_v1.json            # Spec patches from planning
-
-tracker/
-  tracker.yaml                      # Step DAG with status
-
-invariants/
-  invariants.yaml                   # System contracts
-
-rules/
-  rules.yaml                        # Operating policies
-.cursor/
-  rules/*                           # Cursor-specific rules
-
-verification/
-  golden_commands.yaml              # Registered proof commands
-  verify.sh                         # Trusted harness
-  packets/*.json                    # Runtime proof
-
-sentinel/
-  sentinel_rules.yaml               # Security/safety rules
-  results/*.json                    # Scan results
-
-prompts/
-  step_<id>.md                      # Execution prompts
-  review_<id>.md                    # Review prompts
-  patch_<id>.md                     # Fix prompts
-  hotfix_sync.md                    # Post-hoc sync template
-  refactor_brief.md                 # Refactor template
-
-reviews/
-  <id>.md                           # Review decisions
-
-deltas/
-  <timestamp>_<id>.json             # State change records
-
-schemas/
-  *.schema.json                     # Validation schemas
-```
-
----
-
-## Phase Details
-
-### Phase 0: Intent + Context Baseline
-
-**Goal:** Convert soft intent into grounded, structured state.
-
-**Inputs:**
-* Who is the user?
-* What's the "wow" slice?
-* What's "done enough"?
-* What must be researched (not assumed)?
-
-**Outputs:**
-* Evidence Ledger with durable pointers (URLs, excerpts, retrieval dates)
-* Context Pack referencing evidence IDs
-* `spec/spec.yaml` with: north star, constraints, decisions, milestones, open questions
-
-**Exit criteria:** Spec passes schema validation. All claims trace to evidence.
-
----
-
-### Phase 1: Planning Council
-
-**Goal:** Turn spec into executable plan with explicit risks.
-
-**Router decides:** Single-pass (default) or council (high-risk/architectural decisions).
-
-**Council roles (when used):**
-* Builder/Architect — System coherence
-* MVP/Pragmatist — Speed and scope
-* Skeptic/Red-team — Failure modes and security
-
-**Outputs:**
-* `plan/plan_v1.yaml` — Architecture, milestones, step shapes, risk levels
-* `decision_delta_v1.json` — Patches to spec decisions
-* `exception_packet_v1.md` — Only items requiring human review
-
-**Exit criteria:** Plan schema-valid. Decision delta applied. Exceptions resolved.
-
----
-
-### Phase 2: Artifact Compiler
-
-**Goal:** Compile the control plane for reliable Cursor execution.
-
-**Compilation order:**
-1. Tracker DAG (steps with dependencies)
-2. Invariants (global + scoped contracts)
-3. Rules (operating policies)
-4. Golden commands + verification harness
-5. Sentinel rules
-6. Prompt-docs (step/review/patch for each tracker item)
-7. Alignment checks
-
-**Alignment checks:**
-* Every step has prompt paths, risk level, proof policy, golden command keys
-* High-risk steps have machine-required proof
-* Prompt references match tracker IDs
-
-**Exit criteria:** All artifacts pass State Guard. Alignment checks pass. Pack frozen with version tag.
-
----
-
-### Phase 3: Execution Loop
-
-**Goal:** Generate working code in safe, reviewable increments with runtime proof.
-
-**Per-step protocol:**
-1. Select next ready step (dependencies satisfied)
-2. Run `step_<id>.md` prompt
-3. Harness runs golden commands → verification packet
-4. Sentinel scans diff → verdict (CLEAR/WARN/BLOCK)
-5. Run `review_<id>.md` with diff + proof + sentinel result
-6. If FAIL → patch prompt → repeat from step 3
-7. If PASS → emit delta, update tracker via StateAPI
-
-**Exit criteria:** Milestone steps complete. Required proof exists. Thin slice works end-to-end.
-
----
-
-### Phase 4: Surgical Refactor
-
-**Triggers:**
-* Repeated step failures (≥2)
-* Persistent sentinel warnings
-* Complexity threshold crossed
-* Delta conflicts accumulating
-
-**Protocol:**
-1. Write refactor brief (symptoms + evidence)
-2. Router: single-pass or council
-3. Draft minimal patch plan
-4. Compile into tracker steps
-5. Execute via Phase 3 loop
-
-**Exit criteria:** Blocked path unblocked. Build stability restored.
-
----
-
-### Phase 5: Manual + Hotfix Mode
-
-**When you just need to code:**
-
-1. Write intent note (what/why/expected behavior)
-2. Make manual edits
-3. Run harness → proof packet
-4. Sentinel scan
-5. Sync agent emits: delta + tracker update + spec patches if needed
-
-**Exit criteria:** Delta exists. Canonical state updated. Sentinel not blocking.
-
----
-
-## What Makes Good Prompt-Docs
-
-Prompt-docs are step documents, not immutable prompts:
-
-* **Objective** — What this step accomplishes
-* **Acceptance criteria** — How to know it's done
-* **Dependencies** — Files, modules, previous steps required
-* **Don't-do constraints** — Scope boundaries
-* **Deliverables** — Exact files to create/change
-* **Proof command keys** — Which golden commands to run
-* **Risk level + proof policy** — What verification is required
-* **Status pattern** — `PENDING` / `EXECUTED` / `ARCHIVED` / `superseded by X`
-
----
-
-## Intentionally Deferred
-
-Not in this version (add when needed):
-
-* **Rebaseline / delta compaction** — Only after you feel delta bloat
-* **Trusted directory infrastructure** — Anti-log-forging hardening
-* **Cross-model audits everywhere** — Use sparingly for high-risk only
-
----
-
-## Getting Started
-
-### Minimum Viable Pipeline (Weekend Build)
-
-1. **Phase 0:** Question funnel prompt + `spec.yaml` schema + basic validation
-2. **Phase 2:** Template generation for tracker, prompts, rules
-3. **Phase 3:** Manual execution of one step cycle (step → verify → review → delta)
-
-Stub the councils, skip Phase 4, do manual sync for hotfixes. Get one end-to-end cycle working first.
-
-### Full Implementation
-
-See the implementation checklist (coming soon) for build order:
-
-1. Schemas first
-2. State Guard
-3. StateAPI patch verbs
-4. Verification harness
-5. Sentinel scanner
-6. Phase 0 prompts
-7. Phase 1 council logic
-8. Phase 2 compiler
-9. Phase 3 loop orchestration
-
----
-
-## Why This Works
-
-The system succeeds because it respects two truths:
-
-1. **Code is runtime truth** — Only passing tests and working software matter
-2. **Spec is intent truth** — What you're building and why must stay coherent
-
-Everything else—the councils, the verification packets, the sentinel scans, the deltas—exists to keep those two truths aligned while letting you move fast.
-
-When they drift apart, projects fail. This system makes drift visible and recoverable instead of silent and fatal.
-
----
-
-## Council CLI (This Repo)
-
-This repository contains **Phase 1: Planning Council** as a working CLI implementation:
+1. Phase -1: validate commitment + research snapshot
 
 ```bash
-# Run a multi-model council
-council run plan \
-  --project my-project \
-  --packet council/packets/plan_packet.md \
-  --models openai/gpt-5-mini,anthropic/claude-haiku-4.5,google/gemini-2.5-flash-lite \
-  --chair openai/gpt-5-mini
-
-# View results
-council show <run_id> --section synthesis
-
-# Approve and commit
-council approve <run_id> --approve
-council commit <run_id> --repo /path/to/target
+council phase-minus-1-guard --mode commit
 ```
 
-See `council --help` for full CLI documentation.
+2. Run planning council (Phase 1)
+
+```bash
+council run plan \
+  --phase-1-check \
+  --project <project_slug> \
+  --packet council/packets/plan_packet.md \
+  --models <m1>,<m2>,<m3> \
+  --chair <m1>
+```
+
+3. Approve or edit+approve plan
+
+```bash
+council approve <run_id> --approve
+# or
+council approve <run_id> --edit
+```
+
+4. Commit canonical outputs
+
+```bash
+council commit <run_id> --repo <path_to_target_repo>
+```
+
+5. (Planned) Export a zip pack for Cursor
+
+```bash
+# not guaranteed implemented in V0 yet:
+council pack export <run_id> --out artifact_pack.zip
+```
+
+---
+
+## Phase details
+
+## Phase -1: Build selection + bounded research
+
+**Purpose:** stop scope creep before planning.
+
+**Inputs:**
+
+* `phase_minus_1/build_candidate.yaml`
+* `phase_minus_1/research_snapshot.yaml`
+
+**Output:**
+
+* `phase_minus_1/exception_packet.md` (generated)
+* HITL decisions:
+
+  * commit the build?
+  * research sufficient to plan?
+
+**Rule of thumb:** research snapshot should be “enough to not be delusional,” not “complete.”
+
+---
+
+## Phase 0 (Lite): Context pack
+
+**Purpose:** inject context without bloating.
+
+**Inputs:**
+
+* Phase -1 artifacts + whatever you want to include *bounded* (links, constraints, assumptions, unknowns)
+
+**Output:**
+
+* `phase_0/context_pack_lite.md` (human-authored or lightly assisted)
+
+**Important:** the context pack is *not* a dumping ground. Keep it short; keep it factual.
+
+---
+
+## Phase 1: Planning council
+
+**Purpose:** generate one executable plan with multi-perspective critique.
+
+**Mechanics:**
+
+* 3 drafts (different models)
+* 3 critiques
+* chair synthesis
+* **HITL approval** (approve/edit/reject)
+
+**Output:**
+
+* “plan” artifact stored for the run (often verbatim chair synthesis in V0)
+
+**Guardrails:**
+
+* No adding phases
+* No widening scope
+* Explicit verification per step
+
+---
+
+## Phase 2: Artifact councils (sequential, one approval per artifact)
+
+**Purpose:** turn an approved plan into a **canonical artifact pack** you can execute with.
+
+**Artifacts generated in order (recommended):**
+
+1. **Spec update** (`spec/spec.yaml`)
+2. **Tracker steps** (`tracker/tracker.yaml`)
+3. **Step prompts** (`prompts/step_template.md` and per-step variants if needed)
+4. **Review + patch prompts** (`prompts/review_template.md`, `prompts/patch_template.md`)
+5. **Cursor rules** (`.cursor/rules/00_global.md`, `.cursor/rules/10_invariants.md`)
+6. **Invariants** (`invariants/invariants.md`)
+
+**Approval model:**
+
+* Each artifact is produced by a council + chair synthesis
+* You **approve/edit/reject** each artifact
+* Approved artifacts become canonical **until explicitly regenerated**
+
+This keeps complexity from ballooning and prevents “artifact drift” across chats/runs.
+
+---
+
+## Dogfooding (the intended meaning)
+
+Dogfooding means:
+
+> Use this factory to generate artifact packs for **other projects** you want to build in Cursor.
+
+It does **not** mean “the system should recursively build itself” as the primary workflow.
+
+---
+
+## Deep research (planned, not default)
+
+We keep deep research as a **swap-in module**, not a mandatory pipeline step.
+
+Planned knobs:
+
+* **Depth (1–5)**: quick sanity check → deeper synthesis
+* **Source tier strictness (1–5)**: open web → official-only
+* **Accuracy requirement (1–5)**: casual → decision-grade
+
+In V0:
+
+* Research stays bounded in `research_snapshot.yaml`
+* “Claim-level” findings are allowed, but **soft context** should stay in context pack (Phase 0), not in the findings schema.
+
+A future doc will live at:
+
+* `docs/deep_research.md` — research modes, tiering, hallucination minimization strategy
+
+---
+
+## Why CLI (for V0)
+
+CLI is the fastest path to:
+
+* deterministic runs
+* versioned outputs
+* tight integration with git + Cursor
+* low surface area for bugs
+
+Visibility comes from:
+
+* stored artifacts per run (`council show`)
+* optional LangSmith traces (external UI)
+
+V0 intentionally punts a custom UI.
+
+---
+
+## Repo layout (typical)
+
+* `src/agentic_mvp_factory/` — runtime code
+* `council/packets/` — input packets (what the council is asked to do)
+* `phase_minus_1/` — build selection + research snapshot artifacts
+* `spec/` `tracker/` `invariants/` `.cursor/rules/` `prompts/` — canonical outputs
+* `versions/` — snapshots of committed outputs
+
+---
+
+## Roadmap (brief, non-confusing)
+
+* **V0**: stable plan council + stable artifact pack generation + commit/snapshot
+* **V1** (optional): configurable research module + zip export + improved CLI UX
+* **V2+**: verification harness, sentinel checks, richer provenance policies (only if needed)
+
+If you’re reading this repo to use it: focus on V0 flow above.

@@ -84,16 +84,15 @@ council_protocol_v0:
 repo_outputs_v0:
   stable_paths:
     - "spec/spec.yaml"
-    - "tracker/tracker.yaml"
+    - "tracker/factory_tracker.yaml"
     - "invariants/invariants.md"
     - ".cursor/rules/00_global.md"
     - ".cursor/rules/10_invariants.md"
     - "prompts/step_template.md"
     - "prompts/patch_template.md"
-    - "prompts/hotfix_sync.md"
     - "prompts/review_template.md"
     - "prompts/chair_synthesis_template.md"
-    - "docs/build_guide.md"
+    - "docs/ARTIFACT_REGISTRY.md"
   snapshot_versions_root: "versions/<timestamp>_<run_id>/"
   required_on_commit:
     - "Write/update stable paths (overwrites allowed in V0)"

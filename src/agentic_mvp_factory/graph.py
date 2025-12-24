@@ -451,6 +451,14 @@ Produce your synthesis and decision packet.""",
             model=result.model,
         )
         
+        # Store synthesis verbatim as plan artifact (no processing)
+        plan_artifact = write_artifact(
+            run_id=UUID(run_id),
+            kind="plan",
+            content=result.content,
+            model=result.model,
+        )
+        
         return {
             **state,
             "phase": "synthesizing",
@@ -571,6 +579,7 @@ def run_council(
         "critique_artifact_ids": [],
         "synthesis_artifact_id": None,
         "decision_artifact_id": None,
+        "plan_artifact_id": None,
         "draft_count": 0,
         "critique_count": 0,
         "error": None,

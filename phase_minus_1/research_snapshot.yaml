@@ -1,0 +1,28 @@
+schema_version: "0.1"
+build_id: "B01"
+state_version: 1
+retrieved_at: null
+
+research_questions:
+  - id: RQ1
+    question: "What are the best practices for LangGraph state management?"
+    recency_days: 180
+    tags:
+      - langgraph
+      - state-management
+
+findings: []
+
+unknowns:
+  - "Exact recommended LangGraph state patterns for CLI-based workflows"
+  - "How LangGraph persistence behaves across interrupted CLI sessions"
+
+decision_recommendations: []
+
+sufficiency:
+  status: "insufficient"
+  rationale: "Research has not yet been conducted against authoritative sources. Findings are required before planning."
+
+size_caps:
+  max_lines: 250
+  max_words: 1500

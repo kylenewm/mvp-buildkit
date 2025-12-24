@@ -218,3 +218,93 @@ def validate_content_standalone(
     else:
         return False, f"Unknown content type: {content_type}"
 
+
+# --- Phase -1 schema validation ---
+
+def validate_file(file_path: str) -> Tuple[bool, str]:
+    """
+    Validate a YAML file against its corresponding JSON schema.
+    
+    Supports Phase -1 artifacts:
+    - build_candidate.yaml -> schemas/build_candidate.schema.json
+    - research_snapshot.yaml -> schemas/research_snapshot.schema.json
+    
+    Args:
+        file_path: Path to the YAML file to validate
+        
+    Returns:
+        (is_valid, error_message)
+        
+    Raises:
+        FileNotFoundError: If file or schema not found
+        ValueError: If file type not supported
+    """
+    from pathlib import Path
+    
+    try:
+        import jsonschema
+    except ImportError:
+        return False, "jsonschema package not installed. Run: pip install jsonschema"
+    
+    file_path = Path(file_path)
+    
+    if not file_path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
+    
+    # Determine schema file based on filename
+    schema_map = {
+        "build_candidate.yaml": "build_candidate.schema.json",
+        "research_snapshot.yaml": "research_snapshot.schema.json",
+    }
+    
+    filename = file_path.name
+    if filename not in schema_map:
+        raise ValueError(f"No schema defined for file: {filename}")
+    
+    # Find schema file (relative to repo root)
+    schema_filename = schema_map[filename]
+    
+    # Try multiple schema locations
+    possible_schema_paths = [
+        file_path.parent.parent / "schemas" / schema_filename,  # phase_minus_1/../schemas/
+        Path("schemas") / schema_filename,  # ./schemas/
+        file_path.parent / "schemas" / schema_filename,  # same dir/schemas/
+    ]
+    
+    schema_path = None
+    for p in possible_schema_paths:
+        if p.exists():
+            schema_path = p
+            break
+    
+    if schema_path is None:
+        raise FileNotFoundError(f"Schema not found: {schema_filename}")
+    
+    # Load YAML file
+    try:
+        with open(file_path, 'r') as f:
+            data = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        return False, f"YAML parse error: {str(e)}"
+    
+    # Load JSON schema
+    try:
+        with open(schema_path, 'r') as f:
+            schema = json.load(f)
+    except json.JSONDecodeError as e:
+        return False, f"Schema JSON parse error: {str(e)}"
+    
+    # Validate against schema
+    try:
+        jsonschema.validate(instance=data, schema=schema)
+        print(f"✓ {file_path.name} validates against {schema_path.name}")
+        return True, ""
+    except jsonschema.ValidationError as e:
+        error_msg = f"Validation failed: {e.message}"
+        if e.absolute_path:
+            error_msg += f" at path: {list(e.absolute_path)}"
+        print(f"✗ {file_path.name} validation failed: {error_msg}")
+        return False, error_msg
+    except jsonschema.SchemaError as e:
+        return False, f"Schema error: {e.message}"
+

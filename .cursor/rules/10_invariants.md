@@ -1,8 +1,14 @@
 # Cursor Invariants (V0)
 
-Always obey invariants in `invariants/invariants.md`.
+Always obey the canonical invariants in `invariants/invariants.md`.
+Do not duplicate invariant definitions here. This file is reference-only.
 
-When making changes:
-- Avoid sweeping refactors unless required.
-- Never add secrets.
-- Keep repo writes deterministic and scoped to the current step.
+## Quick Reference
+
+- **I1** — No secrets in repo
+- **I2** — No sweeping refactors
+- **I3** — Deterministic and scoped writes
+- **I4** — Namespace isolation
+- **I5** — Single approval checkpoint
+
+If unsure, read `invariants/invariants.md`.

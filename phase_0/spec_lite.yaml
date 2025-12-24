@@ -1,0 +1,37 @@
+schema_version: "0.1"
+build_id: "B01"
+
+north_star:
+  user: "Solo developer or small team building MVPs"
+  wow_slice: "Run council plan, get 3-model debate synthesis, approve with one command, see artifacts committed to repo."
+  success_criteria:
+    - "CLI runs multi-model planning council end-to-end"
+    - "Human can approve/edit/reject before commit"
+    - "Artifacts versioned and committed to target repo"
+    - "Runs traceable via LangSmith"
+
+constraints:
+  - "OpenRouter API only (no direct provider keys)"
+  - "Postgres for persistence (Railway-compatible)"
+  - "No secrets in repo"
+  - "Single approval checkpoint per run"
+  - "CLI-only for V0"
+
+non_goals:
+  - "Autonomous execution without approval"
+  - "Multi-tenant SaaS"
+  - "Web or mobile UI"
+  - "Custom model fine-tuning"
+
+assumptions:
+  - "TypedDict required for LangGraph Studio compatibility (from RQ1/F1)"
+  - "OpenRouter supports parallel requests with exponential backoff (from RQ2/F2)"
+  - "LangGraph checkpoints enable HITL pause/resume (from RQ3/F3)"
+  - "Railway free tier Postgres is sufficient for development"
+  - "OpenRouter rate limits are manageable with 3 parallel models"
+
+open_questions:
+  - "Should rejected runs create child runs or restart fresh?"
+  - "How to handle partial model failures in parallel drafts?"
+  - "What validation is sufficient before commit?"
+

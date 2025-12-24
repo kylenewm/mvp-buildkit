@@ -1,7 +1,7 @@
 # Step Prompt Template (V0)
 
 ## Context
-You are implementing a single, scoped step in a larger build tracked by `tracker/tracker.yaml`.
+You are implementing a single, scoped step in a larger build tracked by `tracker/factory_tracker.yaml`.
 Your job is to produce **working code** and **local proof** for this step, while staying aligned with:
 - `spec/spec.yaml`
 - `invariants/invariants.md`

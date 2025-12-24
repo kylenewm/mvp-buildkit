@@ -1,0 +1,31 @@
+schema_version: "0.1"
+build_id: "B01"
+state_version: 1
+
+title: "TBD"
+problem: "TBD"
+target_user: "TBD"
+
+wow_slice: "TBD"          # must be demo-able in <30s
+done_enough:
+  - "TBD"
+
+constraints:
+  - "TBD"
+
+non_goals:
+  - "TBD"
+
+risks:
+  - "TBD"
+
+open_questions:
+  - "TBD"
+
+# Optional: helps later context injection + scoping (keep small)
+tags:
+  - "TBD"                 # e.g., "auth", "db", "external_api", "ui", "cli"
+
+size_caps:
+  max_lines: 200
+  max_words: 1200

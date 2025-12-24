@@ -10,19 +10,24 @@ from typing import Dict, List, Optional
 from uuid import UUID
 
 
-# Stable paths from spec/spec.yaml repo_outputs_v0
-STABLE_PATHS = [
+# Canonical stable paths (allowlist for commit outputs)
+ALLOWED_PATHS = [
     "spec/spec.yaml",
-    "tracker/tracker.yaml",
+    "tracker/factory_tracker.yaml",
     "invariants/invariants.md",
     ".cursor/rules/00_global.md",
     ".cursor/rules/10_invariants.md",
     "prompts/step_template.md",
     "prompts/patch_template.md",
-    "prompts/hotfix_sync.md",
     "prompts/review_template.md",
     "prompts/chair_synthesis_template.md",
-    "docs/build_guide.md",
+    "docs/workflow.md",
+]
+
+# Explicitly disallowed paths
+DISALLOWED_PATHS = [
+    "prompts/hotfix_sync.md",
+    "tracker/tracker.yaml",
 ]
 
 LOCK_FILE = ".factory-lock"
@@ -88,8 +93,8 @@ def _generate_stub_content(path: str, synthesis: str, decision_packet: str, run_
     """Generate content for a stable path based on council outputs."""
     
     # Map paths to content generators
-    if path == "docs/build_guide.md":
-        return f"""# Build Guide
+    if path == "docs/workflow.md":
+        return f"""# Workflow Guide
 
 > Auto-generated from council run: {run_id}
 
@@ -105,12 +110,12 @@ generated_at: "{datetime.now().isoformat()}"
 run_id: "{run_id}"
 
 # Decision Packet Summary
-# See docs/build_guide.md for full synthesis
+# See docs/workflow.md for full synthesis
 
 {decision_packet}
 """
     
-    elif path == "tracker/tracker.yaml":
+    elif path == "tracker/factory_tracker.yaml":
         return f"""# Project Tracker
 # Auto-generated from council run: {run_id}
 
@@ -122,7 +127,7 @@ steps:
   - id: S01
     title: "Implementation step 1"
     status: todo
-    notes: "See docs/build_guide.md for details"
+    notes: "See docs/workflow.md for details"
 """
     
     elif path == "invariants/invariants.md":
@@ -138,7 +143,7 @@ steps:
 
 ---
 
-*See docs/build_guide.md for full implementation guidance.*
+*See docs/workflow.md for full implementation guidance.*
 """
     
     elif path == ".cursor/rules/00_global.md":
@@ -149,14 +154,14 @@ steps:
 ## Guidelines
 
 1. Follow the spec/spec.yaml for project requirements
-2. Use tracker/tracker.yaml to track progress
+2. Use tracker/factory_tracker.yaml to track progress
 3. Check invariants/invariants.md before making changes
 4. Keep implementations minimal and boring
 
 ## References
 
-- Build Guide: docs/build_guide.md
-- Tracker: tracker/tracker.yaml
+- Workflow Guide: docs/workflow.md
+- Tracker: tracker/factory_tracker.yaml
 """
     
     elif path == ".cursor/rules/10_invariants.md":
@@ -215,24 +220,6 @@ steps:
 [How to verify the fix]
 """
     
-    elif path == "prompts/hotfix_sync.md":
-        return f"""# Hotfix Sync Template
-
-> Auto-generated from council run: {run_id}
-
-## Hotfix: [HOTFIX_ID]
-
-### Critical Issue
-[What urgent problem this addresses]
-
-### Immediate Actions
-1. [Action 1]
-2. [Action 2]
-
-### Follow-up
-[Any cleanup needed after hotfix]
-"""
-    
     elif path == "prompts/review_template.md":
         return f"""# Review Template
 
@@ -282,7 +269,7 @@ steps:
 
 > Auto-generated from council run: {run_id}
 
-*Content placeholder - see docs/build_guide.md for details.*
+*Content placeholder - see docs/workflow.md for details.*
 """
 
 
@@ -353,8 +340,24 @@ def commit_outputs(
         snapshot_dir.mkdir(parents=True, exist_ok=True)
         manifest.snapshot_path = str(snapshot_dir.relative_to(repo_path))
         
-        # Write stable paths
-        for path in STABLE_PATHS:
+        # Validate: only write from allowlist (enforced by using ALLOWED_PATHS directly)
+        # This guard ensures no deprecated paths slip through
+        paths_to_write = ALLOWED_PATHS.copy()
+        for path in paths_to_write:
+            if path in DISALLOWED_PATHS:
+                raise ValueError(
+                    f"Commit blocked: path '{path}' is in disallowed list. "
+                    f"Allowed paths: {ALLOWED_PATHS}"
+                )
+            # Check for deprecated patterns in path
+            if any(disallowed in path for disallowed in ["hotfix_sync.md", "tracker/tracker.yaml"]):
+                raise ValueError(
+                    f"Commit blocked: path '{path}' contains deprecated pattern. "
+                    f"Allowed paths: {ALLOWED_PATHS}"
+                )
+        
+        # Write stable paths (all from allowlist)
+        for path in paths_to_write:
             content = _generate_stub_content(
                 path=path,
                 synthesis=synthesis_content,
@@ -376,8 +379,8 @@ def commit_outputs(
             manifest.stable_paths_written.append(path)
             manifest.file_hashes[path] = _compute_sha256(content)
         
-        # Write manifest to repo
-        manifest_path = repo_path / "COMMIT_MANIFEST.md"
+        # Write manifest to snapshot directory (required)
+        manifest_path = snapshot_dir / "COMMIT_MANIFEST.md"
         manifest_path.write_text(manifest.to_markdown())
         
         # Also write JSON manifest to snapshot

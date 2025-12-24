@@ -163,9 +163,50 @@ def run():
     required=True,
     help="Model ID for chair synthesis",
 )
-def run_plan(project: str, packet: str, models: str, chair: str):
+@click.option(
+    "--phase-1-check",
+    is_flag=True,
+    default=False,
+    help="Validate Phase -1 artifacts before running (blocks if not READY)",
+)
+def run_plan(project: str, packet: str, models: str, chair: str, phase_1_check: bool):
     """Run a council planning workflow."""
     import os
+    from pathlib import Path
+    
+    # Phase -1 check (if requested)
+    if phase_1_check:
+        from agentic_mvp_factory.phase_minus_1.guard import check_phase_minus_1
+        
+        # Default paths (can be made configurable later)
+        phase_dir = Path("phase_minus_1")
+        schemas_dir = Path("schemas")
+        
+        if not phase_dir.exists():
+            click.echo("Error: phase_minus_1/ directory not found.", err=True)
+            raise SystemExit(1)
+        if not schemas_dir.exists():
+            click.echo("Error: schemas/ directory not found.", err=True)
+            raise SystemExit(1)
+        
+        click.echo("Checking Phase -1 readiness...")
+        result = check_phase_minus_1(phase_dir, schemas_dir, mode="commit")
+        
+        if not result.is_ready:
+            click.echo()
+            click.echo("❌ Phase -1 not ready. Fix issues before running council.", err=True)
+            if result.schema_errors:
+                click.echo(f"  Schema errors: {len(result.schema_errors)}", err=True)
+            if result.tbd_fields:
+                click.echo(f"  TBD fields: {len(result.tbd_fields)}", err=True)
+            if result.commit_blockers:
+                click.echo(f"  Commit blockers: {len(result.commit_blockers)}", err=True)
+            click.echo()
+            click.echo("Run: council phase-1-guard --mode commit", err=True)
+            raise SystemExit(1)
+        
+        click.echo("✅ Phase -1 ready")
+        click.echo()
     
     # Check required env vars
     if not os.environ.get("DATABASE_URL"):
@@ -407,7 +448,7 @@ def status(project: str, status_filter: str, limit: int):
 @click.argument("run_id")
 @click.option(
     "--section",
-    type=click.Choice(["summary", "all", "packet", "drafts", "critiques", "synthesis", "decision", "errors", "status", "commit"]),
+    type=click.Choice(["summary", "all", "packet", "drafts", "critiques", "synthesis", "decision", "plan", "errors", "status", "commit"]),
     default="summary",
     help="Which section to display (default: summary)",
 )
@@ -509,12 +550,13 @@ def show(run_id: str, section: str, open_file: bool, full: bool):
         "critiques": "critique",
         "synthesis": "synthesis",
         "decision": "decision_packet",
+        "plan": "plan",
         "errors": "error",
         "commit": "commit_log",
     }
     
     if section == "all":
-        kinds = ["packet", "draft", "critique", "synthesis", "decision_packet", "error", "commit_log"]
+        kinds = ["packet", "draft", "critique", "synthesis", "decision_packet", "plan", "error", "commit_log"]
     else:
         kinds = [section_to_kind[section]]
     
@@ -1014,6 +1056,192 @@ def observe_task(task_id: str, reports_dir: str, deltas_dir: str):
         reports_dir=Path(reports_dir),
         deltas_dir=Path(deltas_dir),
     )
+
+
+# Phase -1: Pre-planning guard
+@cli.command("phase-1-guard")
+@click.option(
+    "--mode",
+    type=click.Choice(["draft", "commit"]),
+    default="draft",
+    help="draft: TBDs allowed; commit: TBDs fail, research must be complete",
+)
+@click.option(
+    "--phase-dir",
+    type=click.Path(),
+    default="phase_minus_1",
+    help="Path to phase_minus_1 directory",
+)
+@click.option(
+    "--schemas-dir",
+    type=click.Path(),
+    default="schemas",
+    help="Path to schemas directory",
+)
+@click.option(
+    "--output",
+    type=click.Path(),
+    default="phase_minus_1/exception_packet.md",
+    help="Path for exception packet output",
+)
+def phase_minus_1_guard(mode: str, phase_dir: str, schemas_dir: str, output: str):
+    """Run Phase -1 guard checks.
+    
+    Validates build_candidate.yaml and research_snapshot.yaml:
+    - Schema validation (JSON Schema Draft-07)
+    - Size cap enforcement (max_lines, max_words)
+    - Cross-file consistency (build_id must match)
+    - TBD field detection
+    
+    Modes:
+      draft  - TBDs allowed, research can be incomplete
+      commit - TBDs fail, research must have retrieved_at + sufficiency evaluated
+    
+    Exit codes:
+      0 = READY to proceed
+      1 = NOT READY (fix issues and re-run)
+    """
+    from pathlib import Path
+    from agentic_mvp_factory.phase_minus_1.guard import (
+        check_phase_minus_1,
+        generate_exception_packet,
+    )
+    
+    phase_path = Path(phase_dir).resolve()
+    schemas_path = Path(schemas_dir).resolve()
+    output_path = Path(output).resolve()
+    
+    click.echo(f"Phase -1 Guard")
+    click.echo(f"  Mode: {mode}")
+    click.echo(f"  Phase dir: {phase_path}")
+    click.echo(f"  Schemas dir: {schemas_path}")
+    click.echo()
+    
+    result = check_phase_minus_1(phase_path, schemas_path, mode=mode)
+    
+    # Generate exception packet
+    packet_path = generate_exception_packet(result, output_path)
+    
+    # Display summary
+    if result.schema_errors:
+        click.echo("Schema Violations:")
+        for error in result.schema_errors:
+            click.echo(f"  ❌ {error}")
+        click.echo()
+    
+    if result.size_violations:
+        click.echo("Size Cap Violations:")
+        for violation in result.size_violations:
+            click.echo(f"  ⚠️ {violation}")
+        click.echo()
+    
+    if result.build_id_mismatch:
+        click.echo("Build ID Mismatch:")
+        click.echo(f"  ❌ {result.build_id_mismatch}")
+        click.echo()
+    
+    if result.commit_blockers:
+        click.echo("Commit Blockers:")
+        for blocker in result.commit_blockers:
+            click.echo(f"  🚫 {blocker}")
+        click.echo()
+    
+    if result.tbd_fields:
+        status = "(blocking)" if mode == "commit" else "(allowed in draft)"
+        click.echo(f"Incomplete Fields (TBD) {status}: {len(result.tbd_fields)}")
+        for field in result.tbd_fields[:5]:
+            click.echo(f"  📝 {field}")
+        if len(result.tbd_fields) > 5:
+            click.echo(f"  ... and {len(result.tbd_fields) - 5} more")
+        click.echo()
+    
+    click.echo("HITL Questions:")
+    for q in result.hitl_questions:
+        click.echo(f"  [ ] {q}")
+    click.echo()
+    
+    click.echo(f"Exception packet: {packet_path}")
+    click.echo()
+    
+    if result.is_ready:
+        click.echo(f"✅ READY - Phase -1 guard passed ({mode} mode)")
+        raise SystemExit(0)
+    else:
+        click.echo(f"❌ NOT READY - Fix issues and re-run ({mode} mode)")
+        raise SystemExit(1)
+
+
+@cli.command("phase-minus-1-research")
+@click.option(
+    "--max-per-question",
+    type=int,
+    default=3,
+    help="Maximum findings per research question (default: 3)",
+)
+@click.option(
+    "--snapshot",
+    type=click.Path(),
+    default="phase_minus_1/research_snapshot.yaml",
+    help="Path to research snapshot YAML",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would be done without writing changes",
+)
+def phase_minus_1_research(max_per_question: int, snapshot: str, dry_run: bool):
+    """Run research for Phase -1 questions.
+    
+    Reads research_snapshot.yaml, runs web searches for each research question,
+    and populates findings with minimal required fields.
+    
+    Updates:
+    - findings[] with new entries (id, claim, source_url, retrieved_at, excerpt)
+    - retrieved_at timestamp
+    - state_version (incremented)
+    """
+    from pathlib import Path
+    from agentic_mvp_factory.phase_minus_1.research_runner import run_research
+    
+    snapshot_path = Path(snapshot).resolve()
+    
+    if not snapshot_path.exists():
+        click.echo(f"Error: Snapshot not found: {snapshot_path}", err=True)
+        raise SystemExit(1)
+    
+    click.echo(f"Phase -1 Research Runner")
+    click.echo(f"  Snapshot: {snapshot_path}")
+    click.echo(f"  Max per question: {max_per_question}")
+    click.echo(f"  Dry run: {dry_run}")
+    click.echo()
+    
+    try:
+        summary = run_research(
+            snapshot_path=snapshot_path,
+            max_per_question=max_per_question,
+            dry_run=dry_run,
+        )
+        
+        click.echo()
+        click.echo("Summary:")
+        click.echo(f"  Questions processed: {summary['questions_processed']}")
+        click.echo(f"  New findings: {summary['new_findings']}")
+        click.echo(f"  Total findings: {summary['total_findings']}")
+        click.echo(f"  Retrieved at: {summary['retrieved_at']}")
+        click.echo()
+        
+        if not dry_run:
+            click.echo("✅ Research snapshot updated")
+            click.echo()
+            click.echo("Next: Run guard to validate")
+            click.echo(f"  council phase-1-guard --mode draft")
+        
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+    except Exception as e:
+        click.echo(f"Unexpected error: {e}", err=True)
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

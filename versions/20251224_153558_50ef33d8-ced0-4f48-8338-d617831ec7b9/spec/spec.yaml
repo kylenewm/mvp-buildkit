@@ -1,0 +1,52 @@
+# Project Specification
+# Auto-generated from council run: 50ef33d8-ced0-4f48-8338-d617831ec7b9
+
+schema_version: "0.1"
+generated_at: "2025-12-24T15:35:58.996250"
+run_id: "50ef33d8-ced0-4f48-8338-d617831ec7b9"
+
+# Decision Packet Summary
+# See docs/build_guide.md for full synthesis
+
+DECISION_PACKET: compact summary with key decisions, next actions, and risks
+
+Key decisions (final, compact)
+1. V0 will perform a local git commit into the target repo on approval (not stage-only).
+2. LangGraph runs embedded in CLI; only a small, JSON-serializable minimal state is persisted (node outputs + metadata). LangGraph internal runtime is not persisted.
+3. HITL: Approval pauses by persisting state and setting runs.status = waiting_human and exiting; resume happens via explicit CLI approve (or reject) command which claims the run and resumes execution.
+4. Reject creates a NEW run_id and MUST set parent_run_id for traceability.
+5. Concurrency is handled with DB claim semantics (SELECT FOR UPDATE + runs.version optimistic lock + claim_owner field).
+6. Commit atomicity: staging dir -> atomic rename -> git add & commit -> update commits row; failures mark run failed and leave artifacts for manual recovery.
+
+Immediate next actions (practical checklist)
+1. Spike (1 day): implement minimal LangGraph state round-trip tests — create a very small state JSON, persist & reload, ensure Runner can re-run remaining nodes idempotently. If issues surface, refactor nodes to be idempotent with node-completed checks.
+2. Implement DB schema migrations (projects, runs, workflow_state, model_calls, artifacts, commits). Add runs.version int and claim_owner. (M0)
+3. Implement ModelClient and OpenRouterClient with retry/backoff (M1).
+4. Implement draft/critique/synthesize node handlers, persist artifacts and model_calls, write workspace files, and persist workflow_state snapshots (M2).
+5. Implement ApprovalNode pause semantics: persist state and exit; add CLI messaging for approve/edit/reject (M3).
+6. Implement claim/approve/edit/reject flows with SELECT FOR UPDATE and resume into commit node; implement atomic commit mechanics and commit SHA capture (M4–M5).
+7. End-to-end integration tests for run → pause → approve (with edit) → commit and reject→rerun. (M6)
+
+Top risks and mitigations
+1. LangGraph serialization risk (state cannot be round-tripped)
+   - Mitigation: Persist only minimal state fields (node outputs, paths, checksums); keep nodes idempotent and re-run from persistent inputs.
+2. Race conditions on approval/resume (two humans claim same run)
+   - Mitigation: Implement DB claim using SELECT FOR UPDATE and the runs.version optimistic lock; reject second claimer with clear message.
+3. Git commit failures leaving partial artifacts
+   - Mitigation: Use staging dir + atomic rename; commit row status indicates committing/committed/commit_failed; on commit failure leave marker file and instruct manual recovery.
+4. Model-provider unreliability (timeouts/429)
+   - Mitigation: Implement 3 retries with exponential backoff + jitter for 429/5xx; log model_calls and surface failures as run failed.
+5. Artifact loss if workspace deleted
+   - Mitigation: record sha256 in artifacts and persist synthesis text in workflow_state JSON as backup for small artifacts; recommend backups for workspace in ops docs.
+6. Secret leakage via artifacts or logs
+   - Mitigation: Do not log API keys; sanitize editor flows; warn users not to include secrets in artifacts in README.
+
+Compact acceptance criteria for first delivery (M0–M3)
+- DB schema applied and CLI init works.
+- ModelClient stub and OpenRouter mocked calls work and model_calls recorded.
+- Full run from `council run` executes draft->critique->chair, persists workflow_state after each node, and pauses at approval with runs.status = waiting_human.
+- `council show` prints chair synthesis; `council approve --run-id --edit` opens editor, saves edits, and prints "approved" (commit step may be implemented in M5 but approve flow continues).
+
+If you approve this direction I will:
+- Produce initial SQL migration files for the Postgres schema above and pseudocode for claim/approve/resume transaction flows.
+- Provide a minimal example of the ModelClient/OpenRouter implementation and the Runner node pseudo-implementations (draft, critique, synth) with idempotency checks.

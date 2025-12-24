@@ -71,16 +71,14 @@ List exactly which files the commit step will write.
 
 Required stable paths:
 - spec/spec.yaml
-- tracker/tracker.yaml
+- tracker/factory_tracker.yaml
 - invariants/invariants.md
 - .cursor/rules/00_global.md
 - .cursor/rules/10_invariants.md
 - prompts/step_template.md
 - prompts/review_template.md
 - prompts/patch_template.md
-- prompts/hotfix_sync.md
 - prompts/chair_synthesis_template.md
-- docs/build_guide.md
 
 Also:
 - versions/<timestamp>_<run_id>/... snapshot copies
