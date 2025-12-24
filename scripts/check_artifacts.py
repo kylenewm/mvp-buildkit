@@ -50,6 +50,14 @@ def find_references(file_path: Path, deprecated: list[str]) -> list[tuple[str, i
 def main():
     repo_root = Path(__file__).parent.parent
     
+    # Hard failure: tracker/tracker.yaml must NOT exist (common typo)
+    typo_tracker = repo_root / "tracker" / "tracker.yaml"
+    if typo_tracker.exists():
+        print("❌ HARD FAILURE: tracker/tracker.yaml exists!")
+        print("   This file is deprecated. Use tracker/factory_tracker.yaml instead.")
+        print("   Delete tracker/tracker.yaml to proceed.")
+        return 1
+    
     # Collect all canonical files
     canonical_files = []
     for glob_pattern in CANONICAL_GLOBS:

@@ -65,14 +65,46 @@ A **CLI-first, stateful “council runner”** that helps you turn a scoped buil
 ### Diagram (V0)
 ```mermaid
 flowchart TD
-  A[Phase -1: build_candidate.yaml + research_snapshot.yaml] --> B{Guard + HITL}
-  B -->|approved| C[Phase 0 Lite: context_pack_lite.md]
-  C --> D[Phase 1: Plan Council\nDrafts -> Critiques -> Chair]
-  D --> E{HITL: Plan approve/edit/reject}
-  E -->|approved| F[Phase 2: Artifact Council (sequential)\nSpec -> Tracker -> Prompts -> Cursor Rules -> Invariants]
-  F --> G{HITL per artifact}
-  G -->|approved all| H[Commit: write canonical files + snapshot]
-  H --> I[(Planned) Export: zip artifact pack for Cursor]
+
+  %% ======================
+  %% PHASE -1
+  %% ======================
+  A["Phase -1A: Build Commitment<br/>build_candidate.yaml<br/>- problem<br/>- target user<br/>- wow slice<br/>- constraints"] --> B["Phase -1B: Research Bounds<br/>research_snapshot.yaml<br/>- questions<br/>- findings<br/>- unknowns"]
+  
+  B --> C{"Phase -1 Guard + HITL<br/>Human confirms:<br/>- build is real<br/>- research sufficient"}
+
+  %% ======================
+  %% PHASE 0
+  %% ======================
+  C -->|approved| D["Phase 0: Intent + Context Pack<br/>context_pack_lite.md<br/>Synthesizes:<br/>- spec<br/>- constraints<br/>- research conclusions"]
+
+  %% ======================
+  %% PHASE 1 — PLAN COUNCIL
+  %% ======================
+  D --> E["Phase 1: PLAN COUNCIL<br/>(parallel drafts + critiques)<br/><br/>INPUTS:<br/>- build_candidate<br/>- research_snapshot<br/>- context_pack<br/><br/>PROCESS:<br/>- 3 model drafts<br/>- 3 cross-critiques<br/>- chair synthesis"]
+
+  E --> F{"HITL: PLAN APPROVAL<br/>Human can:<br/>- approve<br/>- edit + approve<br/>- reject or rerun"}
+
+  %% ======================
+  %% PHASE 2 — ARTIFACT COUNCIL
+  %% ======================
+  F -->|approved| G["Phase 2: ARTIFACT COUNCIL<br/>SEQUENTIAL (one artifact at a time)<br/><br/>For EACH artifact:<br/>- 3 model drafts<br/>- critiques<br/>- chair synthesis"]
+
+  G --> H["Artifact build order<br/>(locked sequence)<br/><br/>1 spec/spec.yaml<br/>2 invariants/invariants.md<br/>3 .cursor/rules/00_global.md<br/>4 .cursor/rules/10_invariants.md<br/>5 tracker/factory_tracker.yaml<br/>6 prompts/chair_synthesis_template.md<br/>7 prompts/step_template.md<br/>8 prompts/review_template.md<br/>9 prompts/patch_template.md"]
+
+  %% ======================
+  %% HITL PER ARTIFACT
+  %% ======================
+  H --> I{"HITL PER ARTIFACT<br/>Human approves or edits<br/>EACH artifact before continuing"}
+
+  %% ======================
+  %% FINALIZATION
+  %% ======================
+  I --> J{"Final Pack Approval<br/>Optional but recommended"}
+
+  J -->|approved| K["Commit + Snapshot<br/>- write canonical files<br/>- versions/TIMESTAMP_RUNID/<br/>- COMMIT_MANIFEST.md"]
+
+  K --> L["Optional Export<br/>Zip artifact pack<br/>for Cursor / external use"]
 ````
 
 ---
@@ -84,7 +116,7 @@ These are the **stable, canonical** files the system writes and future runs refe
 ### Specification & planning
 
 * `spec/spec.yaml` — project spec, constraints, outputs
-* `tracker/tracker.yaml` — step tracker used for execution
+* `tracker/factory_tracker.yaml` — step tracker used for execution
 * `invariants/invariants.md` — non-negotiable contracts
 
 ### Cursor rules
@@ -240,7 +272,7 @@ council pack export <run_id> --out artifact_pack.zip
 **Artifacts generated in order (recommended):**
 
 1. **Spec update** (`spec/spec.yaml`)
-2. **Tracker steps** (`tracker/tracker.yaml`)
+2. **Tracker steps** (`tracker/factory_tracker.yaml`)
 3. **Step prompts** (`prompts/step_template.md` and per-step variants if needed)
 4. **Review + patch prompts** (`prompts/review_template.md`, `prompts/patch_template.md`)
 5. **Cursor rules** (`.cursor/rules/00_global.md`, `.cursor/rules/10_invariants.md`)

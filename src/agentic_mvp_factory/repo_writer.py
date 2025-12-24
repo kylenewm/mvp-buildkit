@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +12,7 @@ from uuid import UUID
 
 
 # Canonical stable paths (allowlist for commit outputs)
+# These are the ONLY root-level paths the commit can write (if missing)
 ALLOWED_PATHS = [
     "spec/spec.yaml",
     "tracker/factory_tracker.yaml",
@@ -21,13 +23,15 @@ ALLOWED_PATHS = [
     "prompts/patch_template.md",
     "prompts/review_template.md",
     "prompts/chair_synthesis_template.md",
-    "docs/workflow.md",
+    "docs/ARTIFACT_REGISTRY.md",
 ]
 
-# Explicitly disallowed paths
+# Explicitly disallowed paths (deprecated, must NEVER be written)
 DISALLOWED_PATHS = [
     "prompts/hotfix_sync.md",
     "tracker/tracker.yaml",
+    "docs/build_guide.md",
+    "COMMIT_MANIFEST.md",  # Only allowed inside versions/, not at repo root
 ]
 
 LOCK_FILE = ".factory-lock"
@@ -89,16 +93,109 @@ def _release_lock(repo_path: Path) -> None:
         lock_file.unlink()
 
 
+def _is_git_repo(repo_path: Path) -> bool:
+    """Check if path is a git repository."""
+    git_dir = repo_path / ".git"
+    return git_dir.exists() and git_dir.is_dir()
+
+
+def _has_uncommitted_changes(repo_path: Path) -> tuple[bool, str]:
+    """Check if repo has uncommitted changes.
+    
+    Returns:
+        (has_changes, status_output)
+    """
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        status_output = result.stdout.strip()
+        return bool(status_output), status_output
+    except subprocess.TimeoutExpired:
+        return True, "git status timed out"
+    except Exception as e:
+        return True, f"git status failed: {e}"
+
+
+def _check_existing_files(repo_path: Path, paths: List[str]) -> List[str]:
+    """Check which canonical paths already exist in the repo.
+    
+    Returns:
+        List of paths that already exist
+    """
+    existing = []
+    for path in paths:
+        full_path = repo_path / path
+        if full_path.exists():
+            existing.append(path)
+    return existing
+
+
+def _validate_paths_allowed(paths: List[str]) -> List[str]:
+    """Validate that all paths are in the allowlist.
+    
+    Returns:
+        List of paths that are NOT allowed
+    """
+    not_allowed = []
+    for path in paths:
+        # Check if path is in allowlist or under versions/
+        if path not in ALLOWED_PATHS and not path.startswith("versions/"):
+            not_allowed.append(path)
+    return not_allowed
+
+
+def _validate_paths_not_disallowed(paths: List[str]) -> List[str]:
+    """Validate that no paths match disallowed patterns.
+    
+    Returns:
+        List of paths that are disallowed
+    """
+    disallowed = []
+    for path in paths:
+        if path in DISALLOWED_PATHS:
+            disallowed.append(path)
+        elif any(d in path for d in DISALLOWED_PATHS):
+            disallowed.append(path)
+    return disallowed
+
+
 def _generate_stub_content(path: str, synthesis: str, decision_packet: str, run_id: str) -> str:
     """Generate content for a stable path based on council outputs."""
     
     # Map paths to content generators
-    if path == "docs/workflow.md":
-        return f"""# Workflow Guide
+    if path == "docs/ARTIFACT_REGISTRY.md":
+        return f"""# Artifact Registry
 
 > Auto-generated from council run: {run_id}
 
-{synthesis}
+## Canonical Artifacts
+
+These files are the source of truth for this project.
+
+### Specification & Planning
+- `spec/spec.yaml`
+- `tracker/factory_tracker.yaml`
+- `invariants/invariants.md`
+
+### Cursor Rules
+- `.cursor/rules/00_global.md`
+- `.cursor/rules/10_invariants.md`
+
+### Prompt Templates
+- `prompts/chair_synthesis_template.md`
+- `prompts/step_template.md`
+- `prompts/review_template.md`
+- `prompts/patch_template.md`
+
+## Deprecated (do not reference)
+- `tracker/tracker.yaml`
+- `docs/build_guide.md`
+- `prompts/hotfix_sync.md`
 """
     
     elif path == "spec/spec.yaml":
@@ -110,7 +207,7 @@ generated_at: "{datetime.now().isoformat()}"
 run_id: "{run_id}"
 
 # Decision Packet Summary
-# See docs/workflow.md for full synthesis
+# See docs/ARTIFACT_REGISTRY.md for canonical artifacts
 
 {decision_packet}
 """
@@ -127,7 +224,7 @@ steps:
   - id: S01
     title: "Implementation step 1"
     status: todo
-    notes: "See docs/workflow.md for details"
+    notes: "See spec/spec.yaml for details"
 """
     
     elif path == "invariants/invariants.md":
@@ -143,7 +240,7 @@ steps:
 
 ---
 
-*See docs/workflow.md for full implementation guidance.*
+*See invariants/invariants.md for full details.*
 """
     
     elif path == ".cursor/rules/00_global.md":
@@ -160,8 +257,9 @@ steps:
 
 ## References
 
-- Workflow Guide: docs/workflow.md
+- Spec: spec/spec.yaml
 - Tracker: tracker/factory_tracker.yaml
+- Artifact Registry: docs/ARTIFACT_REGISTRY.md
 """
     
     elif path == ".cursor/rules/10_invariants.md":
@@ -269,7 +367,7 @@ steps:
 
 > Auto-generated from council run: {run_id}
 
-*Content placeholder - see docs/workflow.md for details.*
+*Content placeholder - see spec/spec.yaml for details.*
 """
 
 
@@ -278,7 +376,7 @@ def commit_outputs(
     repo_path: Path,
 ) -> CommitManifest:
     """
-    Commit council outputs to target repo.
+    Commit council outputs to target repo (additive-only mode).
     
     Args:
         run_id: The approved run to commit
@@ -288,8 +386,8 @@ def commit_outputs(
         CommitManifest with details of written files
         
     Raises:
-        ValueError: If run is not ready to commit
-        RuntimeError: If lock cannot be acquired
+        ValueError: If run is not ready to commit, paths are invalid, or files exist
+        RuntimeError: If lock cannot be acquired, repo is dirty, or not a git repo
     """
     from agentic_mvp_factory.repo import get_run, get_artifacts, write_artifact, update_run_status
     
@@ -319,6 +417,57 @@ def commit_outputs(
     # Ensure repo path exists
     repo_path = Path(repo_path).resolve()
     repo_path.mkdir(parents=True, exist_ok=True)
+    
+    # === FAIL-SAFE CHECKS ===
+    
+    # 1. Verify target is a git repo
+    if not _is_git_repo(repo_path):
+        raise RuntimeError(
+            f"COMMIT BLOCKED: Target path is not a git repository.\n"
+            f"  Path: {repo_path}\n"
+            f"  Initialize with: git init"
+        )
+    
+    # 2. Check for uncommitted changes (dirty repo)
+    has_changes, status_output = _has_uncommitted_changes(repo_path)
+    if has_changes:
+        raise RuntimeError(
+            f"COMMIT BLOCKED: Target repo has uncommitted changes.\n"
+            f"  Path: {repo_path}\n"
+            f"  Status:\n{status_output}\n"
+            f"  Commit or stash changes before running council commit."
+        )
+    
+    # 3. Validate paths to write are all allowed
+    paths_to_write = ALLOWED_PATHS.copy()
+    
+    not_allowed = _validate_paths_allowed(paths_to_write)
+    if not_allowed:
+        raise ValueError(
+            f"COMMIT BLOCKED: Attempted to write non-canonical paths.\n"
+            f"  Blocked paths: {not_allowed}\n"
+            f"  Allowed paths: {ALLOWED_PATHS}"
+        )
+    
+    disallowed = _validate_paths_not_disallowed(paths_to_write)
+    if disallowed:
+        raise ValueError(
+            f"COMMIT BLOCKED: Attempted to write disallowed paths.\n"
+            f"  Blocked paths: {disallowed}\n"
+            f"  Disallowed: {DISALLOWED_PATHS}"
+        )
+    
+    # 4. Additive-only mode: fail if any canonical file already exists
+    existing = _check_existing_files(repo_path, paths_to_write)
+    if existing:
+        raise ValueError(
+            f"COMMIT BLOCKED: Canonical files already exist (additive-only mode).\n"
+            f"  Existing files: {existing}\n"
+            f"  Remove these files or use a fresh repo to proceed.\n"
+            f"  (Override flag not implemented yet.)"
+        )
+    
+    # === END FAIL-SAFE CHECKS ===
     
     # Acquire lock
     if not _acquire_lock(repo_path):
@@ -350,10 +499,10 @@ def commit_outputs(
                     f"Allowed paths: {ALLOWED_PATHS}"
                 )
             # Check for deprecated patterns in path
-            if any(disallowed in path for disallowed in ["hotfix_sync.md", "tracker/tracker.yaml"]):
+            if any(disallowed in path for disallowed in DISALLOWED_PATHS):
                 raise ValueError(
-                    f"Commit blocked: path '{path}' contains deprecated pattern. "
-                    f"Allowed paths: {ALLOWED_PATHS}"
+                    f"Commit blocked: path '{path}' matches disallowed pattern. "
+                    f"Disallowed: {DISALLOWED_PATHS}"
                 )
         
         # Write stable paths (all from allowlist)

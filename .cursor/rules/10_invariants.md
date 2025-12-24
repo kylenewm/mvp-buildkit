@@ -10,5 +10,6 @@ Do not duplicate invariant definitions here. This file is reference-only.
 - **I3** — Deterministic and scoped writes
 - **I4** — Namespace isolation
 - **I5** — Single approval checkpoint
+- **I6** — Commit is Additive-Only (V0 Safety)
 
 If unsure, read `invariants/invariants.md`.
