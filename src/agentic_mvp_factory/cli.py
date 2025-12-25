@@ -1935,77 +1935,216 @@ def phase_minus_1_guard(mode: str, phase_dir: str, schemas_dir: str, output: str
         raise SystemExit(1)
 
 
-@cli.command("phase-minus-1-research")
+@cli.command("research")
 @click.option(
-    "--max-per-question",
-    type=int,
-    default=3,
-    help="Maximum findings per research question (default: 3)",
+    "--project",
+    required=True,
+    help="Project slug for namespace isolation",
 )
 @click.option(
-    "--snapshot",
+    "--provider",
+    type=click.Choice(["tavily", "exa"]),
+    required=True,
+    help="Search provider to use",
+)
+@click.option(
+    "--in",
+    "input_path",
     type=click.Path(),
     default="phase_minus_1/research_snapshot.yaml",
-    help="Path to research snapshot YAML",
+    help="Path to input research snapshot YAML",
 )
 @click.option(
-    "--dry-run",
-    is_flag=True,
-    help="Show what would be done without writing changes",
+    "--out",
+    "output_path",
+    type=click.Path(),
+    default=None,
+    help="Path to output research snapshot YAML (defaults to --in)",
 )
-def phase_minus_1_research(max_per_question: int, snapshot: str, dry_run: bool):
-    """Run research for Phase -1 questions.
+@click.option(
+    "--max-results",
+    type=int,
+    default=3,
+    help="Maximum search results per question (default: 3)",
+)
+@click.option(
+    "--mark-sufficient",
+    is_flag=True,
+    help="Set sufficiency.status to 'sufficient' after research",
+)
+def research_command(
+    project: str,
+    provider: str,
+    input_path: str,
+    output_path: str,
+    max_results: int,
+    mark_sufficient: bool,
+):
+    """Run bounded web search for Phase -1 research questions.
     
-    Reads research_snapshot.yaml, runs web searches for each research question,
-    and populates findings with minimal required fields.
+    Reads research_snapshot.yaml, executes web searches for each question,
+    and populates findings with results from the specified provider.
     
     Updates:
-    - findings[] with new entries (id, claim, source_url, retrieved_at, excerpt)
-    - retrieved_at timestamp
+    - findings[] with new entries (id, claim, source_url, retrieved_at, excerpt, tier, confidence)
+    - retrieved_at timestamp (UTC ISO)
     - state_version (incremented)
+    
+    Examples:
+    
+        council research --project myapp --provider tavily
+        
+        council research --project myapp --provider exa --mark-sufficient
     """
     from pathlib import Path
-    from agentic_mvp_factory.phase_minus_1.research_runner import run_research
+    from .research_runner import run_research
     
-    snapshot_path = Path(snapshot).resolve()
+    in_path = Path(input_path).resolve()
+    out_path = Path(output_path).resolve() if output_path else in_path
     
-    if not snapshot_path.exists():
-        click.echo(f"Error: Snapshot not found: {snapshot_path}", err=True)
+    if not in_path.exists():
+        click.echo(f"Error: Input file not found: {in_path}", err=True)
         raise SystemExit(1)
     
-    click.echo(f"Phase -1 Research Runner")
-    click.echo(f"  Snapshot: {snapshot_path}")
-    click.echo(f"  Max per question: {max_per_question}")
-    click.echo(f"  Dry run: {dry_run}")
+    click.echo(f"=== Phase -1 Research Runner ===")
+    click.echo(f"Project: {project}")
+    click.echo(f"Provider: {provider}")
+    click.echo(f"Input: {in_path}")
+    click.echo(f"Output: {out_path}")
+    click.echo(f"Max results per question: {max_results}")
+    click.echo(f"Mark sufficient: {mark_sufficient}")
     click.echo()
     
+    result = run_research(
+        input_path=in_path,
+        output_path=out_path,
+        provider=provider,
+        max_results_per_question=max_results,
+        findings_per_question=2,  # Keep bounded
+        mark_sufficient=mark_sufficient,
+    )
+    
+    if not result.success:
+        click.echo(f"❌ Research failed: {result.error}", err=True)
+        raise SystemExit(1)
+    
+    click.echo()
+    click.echo("✅ Research complete!")
+    click.echo()
+    click.echo("Summary:")
+    click.echo(f"  Questions processed: {result.questions_processed}")
+    click.echo(f"  New findings: {result.new_findings}")
+    click.echo(f"  Total findings: {result.total_findings}")
+    click.echo(f"  Retrieved at: {result.retrieved_at}")
+    click.echo()
+    click.echo("Next steps:")
+    click.echo(f"  council phase-1-guard --mode commit")
+
+
+# Phase -1: Intake (fast front door)
+@cli.command("intake")
+@click.option(
+    "--project",
+    required=True,
+    help="Project slug for namespace isolation",
+)
+@click.option(
+    "--out-dir",
+    default="phase_minus_1",
+    help="Directory to write artifacts to (default: phase_minus_1)",
+)
+@click.option(
+    "--prompt",
+    default=None,
+    help="Project idea/request text (reads from stdin if not provided)",
+)
+@click.option(
+    "--mode",
+    type=click.Choice(["draft", "commit"]),
+    default="draft",
+    help="draft allows TBD values, commit tries to fill everything",
+)
+@click.option(
+    "--model",
+    default="google/gemini-3-flash-preview",
+    help="Model to use for generation",
+)
+def intake_command(project: str, out_dir: str, prompt: str, mode: str, model: str):
+    """Generate Phase -1 artifacts from a project idea.
+    
+    Fast front door that turns a user's initial request into draft
+    build_candidate.yaml and research_snapshot.yaml files.
+    
+    NO web/search in this step - just structured generation.
+    
+    Examples:
+    
+        council intake --project myapp --prompt "Build a CLI tool that..."
+        
+        echo "Build a CLI tool..." | council intake --project myapp
+    """
+    import sys
+    from pathlib import Path
+    from .phase_minus_1.intake import generate_intake
+    
+    # Get prompt from argument or stdin
+    if prompt is None:
+        if sys.stdin.isatty():
+            click.echo("Error: --prompt is required, or provide input via stdin", err=True)
+            raise SystemExit(2)
+        prompt = sys.stdin.read().strip()
+        if not prompt:
+            click.echo("Error: Empty prompt provided", err=True)
+            raise SystemExit(2)
+    
+    out_path = Path(out_dir)
+    
+    click.echo(f"=== Phase -1 Intake ===")
+    click.echo(f"Project: {project}")
+    click.echo(f"Output: {out_path}/")
+    click.echo(f"Mode: {mode}")
+    click.echo(f"Model: {model}")
+    click.echo()
+    
+    # Optionally create a run record (skip if DB not available)
+    run_id = None
     try:
-        summary = run_research(
-            snapshot_path=snapshot_path,
-            max_per_question=max_per_question,
-            dry_run=dry_run,
+        from .repo import create_run, write_artifact
+        run = create_run(project_slug=project, task_type="intake")
+        run_id = run.id
+        write_artifact(
+            run_id=run_id,
+            kind="packet",
+            content=prompt,
+            model=None,
         )
-        
-        click.echo()
-        click.echo("Summary:")
-        click.echo(f"  Questions processed: {summary['questions_processed']}")
-        click.echo(f"  New findings: {summary['new_findings']}")
-        click.echo(f"  Total findings: {summary['total_findings']}")
-        click.echo(f"  Retrieved at: {summary['retrieved_at']}")
-        click.echo()
-        
-        if not dry_run:
-            click.echo("✅ Research snapshot updated")
-            click.echo()
-            click.echo("Next: Run guard to validate")
-            click.echo(f"  council phase-1-guard --mode draft")
-        
-    except ValueError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise SystemExit(1)
+        click.echo(f"Run ID: {run_id}")
     except Exception as e:
-        click.echo(f"Unexpected error: {e}", err=True)
+        click.echo(f"⚠️  Skipping DB run creation: {e}")
+    
+    click.echo()
+    click.echo("Generating artifacts...")
+    
+    result = generate_intake(
+        prompt=prompt,
+        out_dir=out_path,
+        mode=mode,
+        model=model,
+    )
+    
+    if not result.success:
+        click.echo(f"❌ Intake failed: {result.error}", err=True)
         raise SystemExit(1)
+    
+    click.echo()
+    click.echo("✅ Artifacts generated:")
+    click.echo(f"  - {result.build_candidate_path}")
+    click.echo(f"  - {result.research_snapshot_path}")
+    click.echo(f"  Build ID: {result.build_id}")
+    click.echo()
+    click.echo("Next steps:")
+    click.echo(f"  council phase-1-guard --mode draft")
+    click.echo(f"  council phase-1-guard --mode commit  # (after research)")
 
 
 if __name__ == "__main__":
