@@ -154,18 +154,18 @@ steps:
     intent: "Commit writes tracker/factory_tracker.yaml only + snapshot + manifest."
     deliverables:
       - "tracker/factory_tracker.yaml written into tmp/toy_repo"
-      - "forbidden tracker/tracker.yaml never written"
+      - "no deprecated tracker file written"
     allowed_files:
       - "src/agentic_mvp_factory/repo_writer.py"
       - "src/agentic_mvp_factory/cli.py"
     acceptance:
       - "Toy repo has tracker/factory_tracker.yaml"
-      - "Toy repo does NOT have tracker/tracker.yaml"
+      - "Forbidden paths from registry are absent"
     proof:
       - "council approve <tracker_run_id> --approve"
       - "council commit <tracker_run_id> --repo tmp/toy_repo"
       - "ls -la tmp/toy_repo/tracker"
-      - "! test -f tmp/toy_repo/tracker/tracker.yaml"
+      - "python scripts/check_artifacts.py"
 
   - id: S08
     title: "Phase 2: Prompts Council (4 templates)"
@@ -244,12 +244,11 @@ steps:
       - "src/agentic_mvp_factory/repo.py"
     acceptance:
       - "Toy repo has spec, tracker, invariants, rules, prompts, registry"
-      - "Forbidden paths absent"
+      - "Forbidden paths from registry are absent"
     proof:
       - "council commit pack --project <slug> --from-plan <approved_plan_run_id> --repo tmp/toy_repo"
       - "tree -L 5 tmp/toy_repo"
-      - "! test -f tmp/toy_repo/tracker/tracker.yaml"
-      - "! test -f tmp/toy_repo/prompts/hotfix_sync.md"
+      - "python scripts/check_artifacts.py"
 
   - id: S13
     title: "Drift checker passes (canonical refs only)"

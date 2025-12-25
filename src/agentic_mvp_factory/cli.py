@@ -646,6 +646,235 @@ def run_prompts(plan_run_id: str, project: str, models: str, chair: str):
         raise SystemExit(1)
 
 
+@run.command("cursor-rules")
+@click.option(
+    "--from-plan",
+    "plan_run_id",
+    required=True,
+    help="Run ID of the approved plan to generate cursor rules from",
+)
+@click.option(
+    "--project",
+    required=True,
+    help="Project slug for namespace isolation",
+)
+@click.option(
+    "--models",
+    required=True,
+    help="Comma-separated list of model IDs for drafts/critiques",
+)
+@click.option(
+    "--chair",
+    required=True,
+    help="Model ID for chair synthesis",
+)
+def run_cursor_rules(plan_run_id: str, project: str, models: str, chair: str):
+    """Run a cursor rules generation council (Phase 2).
+    
+    Generates cursor IDE rules from an approved plan:
+    - .cursor/rules/00_global.md
+    - .cursor/rules/10_invariants.md
+    """
+    import os
+    from uuid import UUID as UUIDType
+    
+    # Check required env vars
+    if not os.environ.get("DATABASE_URL"):
+        click.echo("Error: DATABASE_URL environment variable is required.", err=True)
+        raise SystemExit(1)
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        click.echo("Error: OPENROUTER_API_KEY environment variable is required.", err=True)
+        raise SystemExit(1)
+    
+    # Validate plan run ID
+    try:
+        plan_uuid = UUIDType(plan_run_id)
+    except ValueError:
+        click.echo(f"Error: Invalid plan run ID format: {plan_run_id}", err=True)
+        raise SystemExit(1)
+    
+    # Parse models
+    model_list = [m.strip() for m in models.split(",") if m.strip()]
+    if len(model_list) < 2:
+        click.echo("Error: At least 2 models are required.", err=True)
+        raise SystemExit(1)
+    
+    click.echo(f"Running cursor rules council (Phase 2)")
+    click.echo(f"  From plan: {plan_run_id}")
+    click.echo(f"  Project: {project}")
+    click.echo(f"  Models: {model_list}")
+    click.echo(f"  Chair: {chair}")
+    click.echo()
+    
+    try:
+        from agentic_mvp_factory.phase2.cursor_rules_council import run_cursor_rules_council
+        
+        click.echo("Starting cursor rules council...")
+        click.echo(f"  [1/4] Loading approved plan...")
+        click.echo(f"  [2/4] Generating {len(model_list)} cursor rules drafts...")
+        click.echo(f"  [3/4] Generating {len(model_list)} critiques...")
+        click.echo(f"  [4/4] Chair synthesis...")
+        
+        run_id, failed_models = run_cursor_rules_council(
+            plan_run_id=plan_uuid,
+            project_slug=project,
+            models=model_list,
+            chair_model=chair,
+        )
+        
+        click.echo()
+        click.echo(f"Cursor rules council complete!")
+        click.echo(f"  Run ID: {run_id}")
+        
+        if failed_models:
+            click.echo(f"  Failed models: {failed_models}", err=True)
+        
+        # Show artifact counts
+        from agentic_mvp_factory.repo import get_artifacts
+        run_uuid = UUIDType(run_id)
+        drafts = get_artifacts(run_uuid, kind="draft")
+        critiques = get_artifacts(run_uuid, kind="critique")
+        errors = get_artifacts(run_uuid, kind="error")
+        
+        click.echo()
+        click.echo(f"Artifacts created:")
+        click.echo(f"  Drafts: {len(drafts)}")
+        click.echo(f"  Critiques: {len(critiques)}")
+        if errors:
+            click.echo(f"  Errors: {len(errors)}")
+        
+        click.echo()
+        click.echo(f"Status: waiting_for_approval")
+        click.echo()
+        click.echo(f"To view cursor rules envelope:")
+        click.echo(f"  council show {run_id} --section synthesis")
+        click.echo()
+        click.echo(f"To approve:")
+        click.echo(f"  council approve {run_id} --approve")
+        click.echo(f"  council approve {run_id} --edit")
+        
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+
+
+@run.command("invariants")
+@click.option(
+    "--from-plan",
+    "plan_run_id",
+    required=True,
+    help="Run ID of the approved plan to generate invariants from",
+)
+@click.option(
+    "--project",
+    required=True,
+    help="Project slug for namespace isolation",
+)
+@click.option(
+    "--models",
+    required=True,
+    help="Comma-separated list of model IDs for drafts/critiques",
+)
+@click.option(
+    "--chair",
+    required=True,
+    help="Model ID for chair synthesis",
+)
+def run_invariants(plan_run_id: str, project: str, models: str, chair: str):
+    """Run an invariants generation council (Phase 2).
+    
+    Generates the canonical invariants file:
+    - invariants/invariants.md
+    """
+    import os
+    from uuid import UUID as UUIDType
+    
+    # Check required env vars
+    if not os.environ.get("DATABASE_URL"):
+        click.echo("Error: DATABASE_URL environment variable is required.", err=True)
+        raise SystemExit(1)
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        click.echo("Error: OPENROUTER_API_KEY environment variable is required.", err=True)
+        raise SystemExit(1)
+    
+    # Validate plan run ID
+    try:
+        plan_uuid = UUIDType(plan_run_id)
+    except ValueError:
+        click.echo(f"Error: Invalid plan run ID format: {plan_run_id}", err=True)
+        raise SystemExit(1)
+    
+    # Parse models
+    model_list = [m.strip() for m in models.split(",") if m.strip()]
+    if len(model_list) < 2:
+        click.echo("Error: At least 2 models are required.", err=True)
+        raise SystemExit(1)
+    
+    click.echo(f"Running invariants council (Phase 2)")
+    click.echo(f"  From plan: {plan_run_id}")
+    click.echo(f"  Project: {project}")
+    click.echo(f"  Models: {model_list}")
+    click.echo(f"  Chair: {chair}")
+    click.echo()
+    
+    try:
+        from agentic_mvp_factory.phase2.invariants_council import run_invariants_council
+        
+        click.echo("Starting invariants council...")
+        click.echo(f"  [1/4] Loading approved plan...")
+        click.echo(f"  [2/4] Generating {len(model_list)} invariants drafts...")
+        click.echo(f"  [3/4] Generating {len(model_list)} critiques...")
+        click.echo(f"  [4/4] Chair synthesis...")
+        
+        run_id, failed_models = run_invariants_council(
+            plan_run_id=plan_uuid,
+            project_slug=project,
+            models=model_list,
+            chair_model=chair,
+        )
+        
+        click.echo()
+        click.echo(f"Invariants council complete!")
+        click.echo(f"  Run ID: {run_id}")
+        
+        if failed_models:
+            click.echo(f"  Failed models: {failed_models}", err=True)
+        
+        # Show artifact counts
+        from agentic_mvp_factory.repo import get_artifacts
+        run_uuid = UUIDType(run_id)
+        drafts = get_artifacts(run_uuid, kind="draft")
+        critiques = get_artifacts(run_uuid, kind="critique")
+        errors = get_artifacts(run_uuid, kind="error")
+        
+        click.echo()
+        click.echo(f"Artifacts created:")
+        click.echo(f"  Drafts: {len(drafts)}")
+        click.echo(f"  Critiques: {len(critiques)}")
+        if errors:
+            click.echo(f"  Errors: {len(errors)}")
+        
+        click.echo()
+        click.echo(f"Status: waiting_for_approval")
+        click.echo()
+        click.echo(f"To view invariants output:")
+        click.echo(f"  council show {run_id} --section synthesis")
+        click.echo()
+        click.echo(f"To approve:")
+        click.echo(f"  council approve {run_id} --approve")
+        click.echo(f"  council approve {run_id} --edit")
+        
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+
+
 # Model commands (S03)
 @cli.group()
 def model():
@@ -1029,16 +1258,16 @@ def approve(run_id: str, action: str):
         # Simple approve
         create_approval(run_id=run_uuid, decision="approve")
         
-        # Spec/Tracker/Prompts runs have their own validation in their council modules (YAML parsing)
+        # Spec/Tracker/Prompts/Cursor_rules/Invariants runs have their own validation in their council modules
         # Only plan runs need plan-style validation (SYNTHESIS/DECISION_PACKET sections)
-        if run.task_type in ("spec", "tracker", "prompts"):
-            # Spec/Tracker/Prompts runs: just check that output artifact exists (already validated)
+        if run.task_type in ("spec", "tracker", "prompts", "cursor_rules", "invariants"):
+            # These runs: just check that output artifact exists (already validated)
             output_artifacts = get_artifacts(run_uuid, kind="output")
             if not output_artifacts:
                 click.echo(f"Error: No validated output artifact found for {run.task_type} run", err=True)
                 update_run_status(run_uuid, "validation_failed")
                 raise SystemExit(1)
-            click.echo(f"{run.task_type.capitalize()} output validated (YAML already verified)")
+            click.echo(f"{run.task_type.replace('_', ' ').capitalize()} output validated")
         else:
             # Plan runs: validate synthesis and decision_packet sections
             from agentic_mvp_factory.validator import validate_run_outputs
@@ -1102,9 +1331,9 @@ def approve(run_id: str, action: str):
             
             create_approval(run_id=run_uuid, decision="edit_approve", edited_content=edited_content)
             
-            # Spec/Tracker/Prompts runs have their own validation; plan runs need section validation
-            if run.task_type in ("spec", "tracker", "prompts"):
-                # For spec/tracker/prompts edits, validate the edited content as YAML
+            # Spec/Tracker/Prompts/Cursor_rules/Invariants runs have their own validation; plan runs need section validation
+            if run.task_type in ("spec", "tracker", "prompts", "cursor_rules", "invariants"):
+                # For spec/tracker/prompts/cursor_rules edits, validate the edited content as YAML
                 import yaml
                 try:
                     parsed = yaml.safe_load(edited_content)
@@ -1133,10 +1362,30 @@ def approve(run_id: str, action: str):
                         missing = [k for k in required_keys if k not in parsed["outputs"]]
                         if missing:
                             raise ValueError(f"Prompts 'outputs' missing keys: {missing}")
+                    # Cursor_rules-specific validation
+                    if run.task_type == "cursor_rules":
+                        if "outputs" not in parsed:
+                            raise ValueError("Cursor rules YAML must have 'outputs' key")
+                        if not isinstance(parsed["outputs"], dict):
+                            raise ValueError("Cursor rules 'outputs' must be a dict")
+                        required_keys = [
+                            ".cursor/rules/00_global.md",
+                            ".cursor/rules/10_invariants.md",
+                        ]
+                        missing = [k for k in required_keys if k not in parsed["outputs"]]
+                        if missing:
+                            raise ValueError(f"Cursor rules 'outputs' missing keys: {missing}")
                 except Exception as e:
                     click.echo(f"VALIDATION_FAILED: Edited {run.task_type} is not valid YAML: {e}", err=True)
                     update_run_status(run_uuid, "validation_failed")
                     raise SystemExit(1)
+                
+                # Invariants-specific validation (markdown, not YAML)
+                if run.task_type == "invariants":
+                    if "# Invariants (V0)" not in edited_content:
+                        click.echo("VALIDATION_FAILED: Invariants must contain '# Invariants (V0)' header", err=True)
+                        update_run_status(run_uuid, "validation_failed")
+                        raise SystemExit(1)
                 # Store validated edit as output artifact
                 write_artifact(
                     run_id=run_uuid,
@@ -1144,7 +1393,7 @@ def approve(run_id: str, action: str):
                     content=edited_content,
                     model=None,
                 )
-                click.echo(f"{run.task_type.capitalize()} output validated (YAML verified)")
+                click.echo(f"{run.task_type.replace('_', ' ').capitalize()} output validated (YAML verified)")
             else:
                 # Plan runs: validate synthesis and decision_packet sections
                 from agentic_mvp_factory.validator import validate_run_outputs
@@ -1248,7 +1497,7 @@ def commit(run_id: str, repo: str):
     from pathlib import Path
     from uuid import UUID as UUIDType
     from agentic_mvp_factory.repo import get_run
-    from agentic_mvp_factory.repo_writer import commit_outputs, commit_spec_outputs, commit_tracker_outputs
+    from agentic_mvp_factory.repo_writer import commit_outputs, commit_spec_outputs, commit_tracker_outputs, commit_prompts_outputs, commit_cursor_rules_outputs, commit_invariants_outputs
     
     try:
         run_uuid = UUIDType(run_id)
@@ -1269,15 +1518,92 @@ def commit(run_id: str, repo: str):
     click.echo()
     
     try:
-        # Use type-specific commit for spec/tracker runs
+        # Use type-specific commit for spec/tracker/prompts/cursor_rules/invariants runs
         if run.task_type == "spec":
             manifest = commit_spec_outputs(run_uuid, repo_path)
         elif run.task_type == "tracker":
             manifest = commit_tracker_outputs(run_uuid, repo_path)
+        elif run.task_type == "prompts":
+            manifest = commit_prompts_outputs(run_uuid, repo_path)
+        elif run.task_type == "cursor_rules":
+            manifest = commit_cursor_rules_outputs(run_uuid, repo_path)
+        elif run.task_type == "invariants":
+            manifest = commit_invariants_outputs(run_uuid, repo_path)
         else:
             manifest = commit_outputs(run_uuid, repo_path)
         
         click.echo(f"Commit successful!")
+        click.echo()
+        click.echo(f"Files written: {len(manifest.stable_paths_written)}")
+        for path in manifest.stable_paths_written:
+            click.echo(f"  - {path}")
+        click.echo()
+        click.echo(f"Snapshot: {manifest.snapshot_path}")
+        click.echo(f"Manifest: COMMIT_MANIFEST.md (in snapshot dir)")
+        click.echo()
+        click.echo(f"View with: tree {repo_path} -L 3")
+        
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+    except RuntimeError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+    except Exception as e:
+        click.echo(f"Unexpected error: {e}", err=True)
+        raise SystemExit(1)
+
+
+@cli.command("commit-pack")
+@click.option(
+    "--project",
+    required=True,
+    help="Project slug for namespace isolation",
+)
+@click.option(
+    "--from-plan",
+    "plan_run_id",
+    required=True,
+    help="Run ID of the approved plan (parent for all Phase 2 artifacts)",
+)
+@click.option(
+    "--repo",
+    required=True,
+    type=click.Path(),
+    help="Target repository path to write the full pack to",
+)
+def commit_pack_cmd(project: str, plan_run_id: str, repo: str):
+    """Commit full canonical pack to a target repository.
+    
+    Selects the latest approved Phase 2 outputs (spec, tracker, prompts,
+    cursor-rules, invariants) for the given plan and writes them all
+    in a single commit operation.
+    """
+    from pathlib import Path
+    from uuid import UUID as UUIDType
+    from agentic_mvp_factory.repo_writer import commit_pack
+    
+    try:
+        plan_uuid = UUIDType(plan_run_id)
+    except ValueError:
+        click.echo(f"Error: Invalid plan run ID format: {plan_run_id}", err=True)
+        raise SystemExit(1)
+    
+    repo_path = Path(repo).resolve()
+    
+    click.echo(f"Committing full pack to {repo_path}")
+    click.echo(f"  Project: {project}")
+    click.echo(f"  From plan: {plan_run_id}")
+    click.echo()
+    
+    try:
+        manifest = commit_pack(
+            plan_run_id=plan_uuid,
+            project_slug=project,
+            repo_path=repo_path,
+        )
+        
+        click.echo(f"Pack commit successful!")
         click.echo()
         click.echo(f"Files written: {len(manifest.stable_paths_written)}")
         for path in manifest.stable_paths_written:

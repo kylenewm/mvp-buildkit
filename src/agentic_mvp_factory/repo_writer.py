@@ -1135,3 +1135,1003 @@ def commit_tracker_outputs(
     finally:
         # Always release lock
         _release_lock(repo_path)
+
+
+# Required prompt paths for prompts envelope
+REQUIRED_PROMPT_PATHS = [
+    "prompts/step_template.md",
+    "prompts/review_template.md",
+    "prompts/patch_template.md",
+    "prompts/chair_synthesis_template.md",
+]
+
+
+def commit_prompts_outputs(
+    run_id: UUID,
+    repo_path: Path,
+) -> CommitManifest:
+    """
+    Commit prompts outputs to target repository (S09).
+    
+    Writes ONLY:
+    - prompts/step_template.md
+    - prompts/review_template.md
+    - prompts/patch_template.md
+    - prompts/chair_synthesis_template.md
+    (extracted from the YAML envelope in kind="output" artifact)
+    - docs/ARTIFACT_REGISTRY.md (copied from factory if missing)
+    - versions/<timestamp>_<run_id>/... (snapshot + manifest)
+    
+    Args:
+        run_id: The approved prompts run to commit
+        repo_path: Target repository path
+        
+    Returns:
+        CommitManifest with details of written files
+        
+    Raises:
+        ValueError: If run is not ready to commit or not a prompts run
+        RuntimeError: If lock cannot be acquired, repo is dirty, or not a git repo
+    """
+    import yaml
+    from agentic_mvp_factory.repo import get_run, get_artifacts, write_artifact, update_run_status
+    
+    # Validate run exists and is ready
+    run = get_run(run_id)
+    if not run:
+        raise ValueError(f"Run not found: {run_id}")
+    
+    if run.status != "ready_to_commit":
+        raise ValueError(f"Run is not ready to commit (status: {run.status})")
+    
+    if run.task_type != "prompts":
+        raise ValueError(f"Run is not a prompts run (task_type: {run.task_type})")
+    
+    # Get output artifact (validated prompts envelope)
+    prompts_artifacts = get_artifacts(run_id, kind="output")
+    if not prompts_artifacts:
+        raise ValueError("No prompts envelope (kind='output') artifact found")
+    
+    envelope_content = prompts_artifacts[0].content
+    
+    # Parse YAML envelope
+    try:
+        envelope = yaml.safe_load(envelope_content)
+    except yaml.YAMLError as ye:
+        raise ValueError(f"Failed to parse prompts envelope YAML: {ye}")
+    
+    if not isinstance(envelope, dict):
+        raise ValueError("Prompts envelope must be a YAML dict")
+    
+    if "outputs" not in envelope:
+        raise ValueError("Prompts envelope missing 'outputs' key")
+    
+    outputs = envelope["outputs"]
+    if not isinstance(outputs, dict):
+        raise ValueError("Prompts envelope 'outputs' must be a dict")
+    
+    # Validate EXACTLY the 4 required paths
+    missing_keys = [k for k in REQUIRED_PROMPT_PATHS if k not in outputs]
+    if missing_keys:
+        raise ValueError(f"Prompts envelope missing required paths: {missing_keys}")
+    
+    extra_keys = [k for k in outputs.keys() if k not in REQUIRED_PROMPT_PATHS]
+    if extra_keys:
+        raise ValueError(f"Prompts envelope has unexpected paths: {extra_keys}")
+    
+    # Extract content for each prompt file
+    prompt_contents = {}
+    for path in REQUIRED_PROMPT_PATHS:
+        content = outputs[path]
+        if not isinstance(content, str):
+            raise ValueError(f"Prompts envelope outputs['{path}'] must be a string")
+        if not content.strip():
+            raise ValueError(f"Prompts envelope outputs['{path}'] is empty")
+        prompt_contents[path] = content
+    
+    # Ensure repo path exists
+    repo_path = Path(repo_path).resolve()
+    repo_path.mkdir(parents=True, exist_ok=True)
+    
+    # === S02: Load Registry (single source of truth) ===
+    
+    source_registry_path = Path(REGISTRY_PATH)
+    registry, registry_error = parse_artifact_registry(source_registry_path)
+    
+    print(f"[S02] Registry loaded from: {registry.source}")
+    print(f"[S02] Canonical paths: {len(registry.canonical)}")
+    
+    if registry_error and registry.source == "fallback":
+        raise RuntimeError(
+            f"COMMIT BLOCKED: ARTIFACT_REGISTRY missing or unparsable.\n"
+            f"  Path: {source_registry_path.resolve()}\n"
+            f"  Error: {registry_error}\n"
+            f"  Fix: Ensure docs/ARTIFACT_REGISTRY.md exists with ## Canonical section."
+        )
+    
+    # === FAIL-SAFE CHECKS (S01: Commit Safety Rails) ===
+    
+    # 1. Verify target is a git repo
+    is_git, git_error = _is_git_repo(repo_path)
+    if not is_git:
+        raise RuntimeError(
+            f"COMMIT BLOCKED: Target path is not a git repository.\n"
+            f"  Reason: non-git\n"
+            f"  Path: {repo_path}\n"
+            f"  Detail: {git_error}\n"
+            f"  Fix: Initialize with 'git init'"
+        )
+    
+    # 2. Check for uncommitted changes (dirty repo)
+    has_changes, status_output = _has_uncommitted_changes(repo_path)
+    if has_changes:
+        raise RuntimeError(
+            f"COMMIT BLOCKED: Target repo has uncommitted changes.\n"
+            f"  Reason: dirty repo\n"
+            f"  Path: {repo_path}\n"
+            f"  Offending files:\n{status_output}\n"
+            f"  Fix: Commit or stash changes before running council commit."
+        )
+    
+    # 3. S09: Prompts-only allowlist - write 4 prompt files + registry if missing
+    registry_dest_path = "docs/ARTIFACT_REGISTRY.md"
+    paths_to_write = list(REQUIRED_PROMPT_PATHS)
+    
+    # Check if registry needs to be written (only if missing)
+    registry_dest = repo_path / registry_dest_path
+    if not registry_dest.exists():
+        paths_to_write.append(registry_dest_path)
+    
+    # Validate all paths against registry allowlist
+    for path in paths_to_write:
+        # Check forbidden first
+        if registry.is_forbidden(path):
+            raise ValueError(
+                f"COMMIT BLOCKED: {path} is forbidden.\n"
+                f"  Reason: forbidden path (from registry)\n"
+                f"  Forbidden (per docs/ARTIFACT_REGISTRY.md): {registry.forbidden}"
+            )
+        
+        # Check it's in canonical list
+        if not registry.is_allowed(path):
+            raise ValueError(
+                f"COMMIT BLOCKED: {path} is not in allowlist.\n"
+                f"  Reason: non-canonical write (not in registry)\n"
+                f"  Offending paths: [{path}]\n"
+                f"  Allowed (per docs/ARTIFACT_REGISTRY.md): {registry.canonical}"
+            )
+    
+    # 4. Additive-only: fail if any prompt file already exists
+    existing = _check_existing_files(repo_path, REQUIRED_PROMPT_PATHS)
+    if existing:
+        raise ValueError(
+            f"COMMIT BLOCKED: Prompt files already exist (additive-only mode).\n"
+            f"  Reason: overwrite\n"
+            f"  Offending files: {existing}\n"
+            f"  Fix: Remove these files or use a fresh repo to proceed."
+        )
+    
+    # === END FAIL-SAFE CHECKS ===
+    
+    # Acquire lock
+    if not _acquire_lock(repo_path):
+        raise RuntimeError(f"Cannot acquire lock - another commit may be in progress. Check {repo_path / LOCK_FILE}")
+    
+    try:
+        # Update status to committing
+        update_run_status(run_id, "committing")
+        
+        # Prepare manifest
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        manifest = CommitManifest(
+            run_id=str(run_id),
+            timestamp=timestamp,
+        )
+        
+        # Create snapshot directory
+        snapshot_dir = repo_path / "versions" / f"{timestamp}_{run_id}"
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        manifest.snapshot_path = str(snapshot_dir.relative_to(repo_path))
+        
+        # Write each prompt file
+        for prompt_path, content in prompt_contents.items():
+            # Write to stable location
+            prompt_file = repo_path / prompt_path
+            prompt_file.parent.mkdir(parents=True, exist_ok=True)
+            prompt_file.write_text(content)
+            
+            # Write to snapshot
+            snapshot_file = snapshot_dir / prompt_path
+            snapshot_file.parent.mkdir(parents=True, exist_ok=True)
+            snapshot_file.write_text(content)
+            
+            # Record in manifest
+            manifest.stable_paths_written.append(prompt_path)
+            manifest.file_hashes[prompt_path] = _compute_sha256(content)
+        
+        # S09: Copy docs/ARTIFACT_REGISTRY.md to target repo if missing
+        if not registry_dest.exists():
+            # Copy from factory's registry
+            factory_registry = Path(REGISTRY_PATH)
+            if factory_registry.exists():
+                registry_content = factory_registry.read_text()
+                registry_dest.parent.mkdir(parents=True, exist_ok=True)
+                registry_dest.write_text(registry_content)
+                
+                # Record in manifest
+                manifest.stable_paths_written.append(registry_dest_path)
+                manifest.file_hashes[registry_dest_path] = _compute_sha256(registry_content)
+                
+                # Also write to snapshot
+                snapshot_registry = snapshot_dir / registry_dest_path
+                snapshot_registry.parent.mkdir(parents=True, exist_ok=True)
+                snapshot_registry.write_text(registry_content)
+        
+        # Write manifest to snapshot directory only (not repo root)
+        manifest_path = snapshot_dir / "COMMIT_MANIFEST.md"
+        manifest_path.write_text(manifest.to_markdown())
+        
+        # Also write JSON manifest to snapshot
+        manifest_json_path = snapshot_dir / "manifest.json"
+        manifest_json_path.write_text(manifest.to_json())
+        
+        # Store manifest as artifact in DB
+        write_artifact(
+            run_id=run_id,
+            kind="commit_log",
+            content=manifest.to_json(),
+            model=None,
+        )
+        
+        # Update status to completed
+        update_run_status(run_id, "completed")
+        
+        return manifest
+        
+    finally:
+        # Always release lock
+        _release_lock(repo_path)
+
+
+# Required cursor rules paths for cursor_rules envelope
+REQUIRED_CURSOR_RULES_PATHS = [
+    ".cursor/rules/00_global.md",
+    ".cursor/rules/10_invariants.md",
+]
+
+
+def commit_cursor_rules_outputs(
+    run_id: UUID,
+    repo_path: Path,
+) -> CommitManifest:
+    """
+    Commit cursor rules outputs to target repository (S11).
+    
+    Writes ONLY:
+    - .cursor/rules/00_global.md
+    - .cursor/rules/10_invariants.md
+    (extracted from the YAML envelope in kind="output" artifact)
+    - docs/ARTIFACT_REGISTRY.md (copied from factory if missing)
+    - versions/<timestamp>_<run_id>/... (snapshot + manifest)
+    
+    Args:
+        run_id: The approved cursor_rules run to commit
+        repo_path: Target repository path
+        
+    Returns:
+        CommitManifest with details of written files
+        
+    Raises:
+        ValueError: If run is not ready to commit or not a cursor_rules run
+        RuntimeError: If lock cannot be acquired, repo is dirty, or not a git repo
+    """
+    import yaml
+    from agentic_mvp_factory.repo import get_run, get_artifacts, write_artifact, update_run_status
+    
+    # Validate run exists and is ready
+    run = get_run(run_id)
+    if not run:
+        raise ValueError(f"Run not found: {run_id}")
+    
+    if run.status != "ready_to_commit":
+        raise ValueError(f"Run is not ready to commit (status: {run.status})")
+    
+    if run.task_type != "cursor_rules":
+        raise ValueError(f"Run is not a cursor_rules run (task_type: {run.task_type})")
+    
+    # Get output artifact (validated cursor_rules envelope)
+    rules_artifacts = get_artifacts(run_id, kind="output")
+    if not rules_artifacts:
+        raise ValueError("No cursor_rules envelope (kind='output') artifact found")
+    
+    envelope_content = rules_artifacts[0].content
+    
+    # Parse YAML envelope
+    try:
+        envelope = yaml.safe_load(envelope_content)
+    except yaml.YAMLError as ye:
+        raise ValueError(f"Failed to parse cursor_rules envelope YAML: {ye}")
+    
+    if not isinstance(envelope, dict):
+        raise ValueError("Cursor rules envelope must be a YAML dict")
+    
+    if "outputs" not in envelope:
+        raise ValueError("Cursor rules envelope missing 'outputs' key")
+    
+    outputs = envelope["outputs"]
+    if not isinstance(outputs, dict):
+        raise ValueError("Cursor rules envelope 'outputs' must be a dict")
+    
+    # Validate EXACTLY the 2 required paths
+    missing_keys = [k for k in REQUIRED_CURSOR_RULES_PATHS if k not in outputs]
+    if missing_keys:
+        raise ValueError(f"Cursor rules envelope missing required paths: {missing_keys}")
+    
+    extra_keys = [k for k in outputs.keys() if k not in REQUIRED_CURSOR_RULES_PATHS]
+    if extra_keys:
+        raise ValueError(f"Cursor rules envelope has unexpected paths: {extra_keys}")
+    
+    # Extract content for each rule file
+    rules_contents = {}
+    for path in REQUIRED_CURSOR_RULES_PATHS:
+        content = outputs[path]
+        if not isinstance(content, str):
+            raise ValueError(f"Cursor rules envelope outputs['{path}'] must be a string")
+        if not content.strip():
+            raise ValueError(f"Cursor rules envelope outputs['{path}'] is empty")
+        rules_contents[path] = content
+    
+    # Ensure repo path exists
+    repo_path = Path(repo_path).resolve()
+    repo_path.mkdir(parents=True, exist_ok=True)
+    
+    # === S02: Load Registry (single source of truth) ===
+    
+    source_registry_path = Path(REGISTRY_PATH)
+    registry, registry_error = parse_artifact_registry(source_registry_path)
+    
+    print(f"[S02] Registry loaded from: {registry.source}")
+    print(f"[S02] Canonical paths: {len(registry.canonical)}")
+    
+    if registry_error and registry.source == "fallback":
+        raise RuntimeError(
+            f"COMMIT BLOCKED: ARTIFACT_REGISTRY missing or unparsable.\n"
+            f"  Path: {source_registry_path.resolve()}\n"
+            f"  Error: {registry_error}\n"
+            f"  Fix: Ensure docs/ARTIFACT_REGISTRY.md exists with ## Canonical section."
+        )
+    
+    # === FAIL-SAFE CHECKS (S01: Commit Safety Rails) ===
+    
+    # 1. Verify target is a git repo
+    is_git, git_error = _is_git_repo(repo_path)
+    if not is_git:
+        raise RuntimeError(
+            f"COMMIT BLOCKED: Target path is not a git repository.\n"
+            f"  Reason: non-git\n"
+            f"  Path: {repo_path}\n"
+            f"  Detail: {git_error}\n"
+            f"  Fix: Initialize with 'git init'"
+        )
+    
+    # 2. Check for uncommitted changes (dirty repo)
+    has_changes, status_output = _has_uncommitted_changes(repo_path)
+    if has_changes:
+        raise RuntimeError(
+            f"COMMIT BLOCKED: Target repo has uncommitted changes.\n"
+            f"  Reason: dirty repo\n"
+            f"  Path: {repo_path}\n"
+            f"  Offending files:\n{status_output}\n"
+            f"  Fix: Commit or stash changes before running council commit."
+        )
+    
+    # 3. S11: Cursor rules-only allowlist - write 2 rule files + registry if missing
+    registry_dest_path = "docs/ARTIFACT_REGISTRY.md"
+    paths_to_write = list(REQUIRED_CURSOR_RULES_PATHS)
+    
+    # Check if registry needs to be written (only if missing)
+    registry_dest = repo_path / registry_dest_path
+    if not registry_dest.exists():
+        paths_to_write.append(registry_dest_path)
+    
+    # Validate all paths against registry allowlist
+    for path in paths_to_write:
+        # Check forbidden first
+        if registry.is_forbidden(path):
+            raise ValueError(
+                f"COMMIT BLOCKED: {path} is forbidden.\n"
+                f"  Reason: forbidden path (from registry)\n"
+                f"  Forbidden (per docs/ARTIFACT_REGISTRY.md): {registry.forbidden}"
+            )
+        
+        # Check it's in canonical list
+        if not registry.is_allowed(path):
+            raise ValueError(
+                f"COMMIT BLOCKED: {path} is not in allowlist.\n"
+                f"  Reason: non-canonical write (not in registry)\n"
+                f"  Offending paths: [{path}]\n"
+                f"  Allowed (per docs/ARTIFACT_REGISTRY.md): {registry.canonical}"
+            )
+    
+    # 4. Additive-only: fail if any cursor rule file already exists
+    existing = _check_existing_files(repo_path, REQUIRED_CURSOR_RULES_PATHS)
+    if existing:
+        raise ValueError(
+            f"COMMIT BLOCKED: Cursor rule files already exist (additive-only mode).\n"
+            f"  Reason: overwrite\n"
+            f"  Offending files: {existing}\n"
+            f"  Fix: Remove these files or use a fresh repo to proceed."
+        )
+    
+    # === END FAIL-SAFE CHECKS ===
+    
+    # Acquire lock
+    if not _acquire_lock(repo_path):
+        raise RuntimeError(f"Cannot acquire lock - another commit may be in progress. Check {repo_path / LOCK_FILE}")
+    
+    try:
+        # Update status to committing
+        update_run_status(run_id, "committing")
+        
+        # Prepare manifest
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        manifest = CommitManifest(
+            run_id=str(run_id),
+            timestamp=timestamp,
+        )
+        
+        # Create snapshot directory
+        snapshot_dir = repo_path / "versions" / f"{timestamp}_{run_id}"
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        manifest.snapshot_path = str(snapshot_dir.relative_to(repo_path))
+        
+        # Write each cursor rule file
+        for rule_path, content in rules_contents.items():
+            # Write to stable location (ensure parent dirs exist)
+            rule_file = repo_path / rule_path
+            rule_file.parent.mkdir(parents=True, exist_ok=True)
+            rule_file.write_text(content)
+            
+            # Write to snapshot
+            snapshot_file = snapshot_dir / rule_path
+            snapshot_file.parent.mkdir(parents=True, exist_ok=True)
+            snapshot_file.write_text(content)
+            
+            # Record in manifest
+            manifest.stable_paths_written.append(rule_path)
+            manifest.file_hashes[rule_path] = _compute_sha256(content)
+        
+        # S11: Copy docs/ARTIFACT_REGISTRY.md to target repo if missing
+        if not registry_dest.exists():
+            # Copy from factory's registry
+            factory_registry = Path(REGISTRY_PATH)
+            if factory_registry.exists():
+                registry_content = factory_registry.read_text()
+                registry_dest.parent.mkdir(parents=True, exist_ok=True)
+                registry_dest.write_text(registry_content)
+                
+                # Record in manifest
+                manifest.stable_paths_written.append(registry_dest_path)
+                manifest.file_hashes[registry_dest_path] = _compute_sha256(registry_content)
+                
+                # Also write to snapshot
+                snapshot_registry = snapshot_dir / registry_dest_path
+                snapshot_registry.parent.mkdir(parents=True, exist_ok=True)
+                snapshot_registry.write_text(registry_content)
+        
+        # Write manifest to snapshot directory only (not repo root)
+        manifest_path = snapshot_dir / "COMMIT_MANIFEST.md"
+        manifest_path.write_text(manifest.to_markdown())
+        
+        # Also write JSON manifest to snapshot
+        manifest_json_path = snapshot_dir / "manifest.json"
+        manifest_json_path.write_text(manifest.to_json())
+        
+        # Store manifest as artifact in DB
+        write_artifact(
+            run_id=run_id,
+            kind="commit_log",
+            content=manifest.to_json(),
+            model=None,
+        )
+        
+        # Update status to completed
+        update_run_status(run_id, "completed")
+        
+        return manifest
+        
+    finally:
+        # Always release lock
+        _release_lock(repo_path)
+
+
+# Invariants output path
+INVARIANTS_PATH = "invariants/invariants.md"
+
+
+def commit_invariants_outputs(
+    run_id: UUID,
+    repo_path: Path,
+) -> CommitManifest:
+    """
+    Commit invariants outputs to target repository (S13).
+    
+    Writes ONLY:
+    - invariants/invariants.md (from kind="output" markdown artifact)
+    - docs/ARTIFACT_REGISTRY.md (copied from factory if missing)
+    - versions/<timestamp>_<run_id>/... (snapshot + manifest)
+    
+    Args:
+        run_id: The approved invariants run to commit
+        repo_path: Target repository path
+        
+    Returns:
+        CommitManifest with details of written files
+        
+    Raises:
+        ValueError: If run is not ready to commit or not an invariants run
+        RuntimeError: If lock cannot be acquired, repo is dirty, or not a git repo
+    """
+    from agentic_mvp_factory.repo import get_run, get_artifacts, write_artifact, update_run_status
+    
+    # Validate run exists and is ready
+    run = get_run(run_id)
+    if not run:
+        raise ValueError(f"Run not found: {run_id}")
+    
+    if run.status != "ready_to_commit":
+        raise ValueError(f"Run is not ready to commit (status: {run.status})")
+    
+    if run.task_type != "invariants":
+        raise ValueError(f"Run is not an invariants run (task_type: {run.task_type})")
+    
+    # Get output artifact (validated invariants markdown)
+    inv_artifacts = get_artifacts(run_id, kind="output")
+    if not inv_artifacts:
+        raise ValueError("No invariants (kind='output') artifact found")
+    
+    invariants_content = inv_artifacts[0].content
+    
+    # Ensure repo path exists
+    repo_path = Path(repo_path).resolve()
+    repo_path.mkdir(parents=True, exist_ok=True)
+    
+    # === S02: Load Registry (single source of truth) ===
+    
+    source_registry_path = Path(REGISTRY_PATH)
+    registry, registry_error = parse_artifact_registry(source_registry_path)
+    
+    print(f"[S02] Registry loaded from: {registry.source}")
+    print(f"[S02] Canonical paths: {len(registry.canonical)}")
+    
+    if registry_error and registry.source == "fallback":
+        raise RuntimeError(
+            f"COMMIT BLOCKED: ARTIFACT_REGISTRY missing or unparsable.\n"
+            f"  Path: {source_registry_path.resolve()}\n"
+            f"  Error: {registry_error}\n"
+            f"  Fix: Ensure docs/ARTIFACT_REGISTRY.md exists with ## Canonical section."
+        )
+    
+    # === FAIL-SAFE CHECKS (S01: Commit Safety Rails) ===
+    
+    # 1. Verify target is a git repo
+    is_git, git_error = _is_git_repo(repo_path)
+    if not is_git:
+        raise RuntimeError(
+            f"COMMIT BLOCKED: Target path is not a git repository.\n"
+            f"  Reason: non-git\n"
+            f"  Path: {repo_path}\n"
+            f"  Detail: {git_error}\n"
+            f"  Fix: Initialize with 'git init'"
+        )
+    
+    # 2. Check for uncommitted changes (dirty repo)
+    has_changes, status_output = _has_uncommitted_changes(repo_path)
+    if has_changes:
+        raise RuntimeError(
+            f"COMMIT BLOCKED: Target repo has uncommitted changes.\n"
+            f"  Reason: dirty repo\n"
+            f"  Path: {repo_path}\n"
+            f"  Offending files:\n{status_output}\n"
+            f"  Fix: Commit or stash changes before running council commit."
+        )
+    
+    # 3. S13: Invariants-only allowlist - write invariants + registry if missing
+    registry_dest_path = "docs/ARTIFACT_REGISTRY.md"
+    paths_to_write = [INVARIANTS_PATH]
+    
+    # Check if registry needs to be written (only if missing)
+    registry_dest = repo_path / registry_dest_path
+    if not registry_dest.exists():
+        paths_to_write.append(registry_dest_path)
+    
+    # Validate all paths against registry allowlist
+    for path in paths_to_write:
+        # Check forbidden first
+        if registry.is_forbidden(path):
+            raise ValueError(
+                f"COMMIT BLOCKED: {path} is forbidden.\n"
+                f"  Reason: forbidden path (from registry)\n"
+                f"  Forbidden (per docs/ARTIFACT_REGISTRY.md): {registry.forbidden}"
+            )
+        
+        # Check it's in canonical list
+        if not registry.is_allowed(path):
+            raise ValueError(
+                f"COMMIT BLOCKED: {path} is not in allowlist.\n"
+                f"  Reason: non-canonical write (not in registry)\n"
+                f"  Offending paths: [{path}]\n"
+                f"  Allowed (per docs/ARTIFACT_REGISTRY.md): {registry.canonical}"
+            )
+    
+    # 4. Additive-only: fail if invariants file already exists
+    existing = _check_existing_files(repo_path, [INVARIANTS_PATH])
+    if existing:
+        raise ValueError(
+            f"COMMIT BLOCKED: Invariants file already exists (additive-only mode).\n"
+            f"  Reason: overwrite\n"
+            f"  Offending files: {existing}\n"
+            f"  Fix: Remove this file or use a fresh repo to proceed."
+        )
+    
+    # === END FAIL-SAFE CHECKS ===
+    
+    # Acquire lock
+    if not _acquire_lock(repo_path):
+        raise RuntimeError(f"Cannot acquire lock - another commit may be in progress. Check {repo_path / LOCK_FILE}")
+    
+    try:
+        # Update status to committing
+        update_run_status(run_id, "committing")
+        
+        # Prepare manifest
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        manifest = CommitManifest(
+            run_id=str(run_id),
+            timestamp=timestamp,
+        )
+        
+        # Create snapshot directory
+        snapshot_dir = repo_path / "versions" / f"{timestamp}_{run_id}"
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        manifest.snapshot_path = str(snapshot_dir.relative_to(repo_path))
+        
+        # Write invariants file
+        inv_file = repo_path / INVARIANTS_PATH
+        inv_file.parent.mkdir(parents=True, exist_ok=True)
+        inv_file.write_text(invariants_content)
+        
+        # Write to snapshot
+        snapshot_inv = snapshot_dir / INVARIANTS_PATH
+        snapshot_inv.parent.mkdir(parents=True, exist_ok=True)
+        snapshot_inv.write_text(invariants_content)
+        
+        # Record in manifest
+        manifest.stable_paths_written.append(INVARIANTS_PATH)
+        manifest.file_hashes[INVARIANTS_PATH] = _compute_sha256(invariants_content)
+        
+        # S13: Copy docs/ARTIFACT_REGISTRY.md to target repo if missing
+        if not registry_dest.exists():
+            # Copy from factory's registry
+            factory_registry = Path(REGISTRY_PATH)
+            if factory_registry.exists():
+                registry_content = factory_registry.read_text()
+                registry_dest.parent.mkdir(parents=True, exist_ok=True)
+                registry_dest.write_text(registry_content)
+                
+                # Record in manifest
+                manifest.stable_paths_written.append(registry_dest_path)
+                manifest.file_hashes[registry_dest_path] = _compute_sha256(registry_content)
+                
+                # Also write to snapshot
+                snapshot_registry = snapshot_dir / registry_dest_path
+                snapshot_registry.parent.mkdir(parents=True, exist_ok=True)
+                snapshot_registry.write_text(registry_content)
+        
+        # Write manifest to snapshot directory only (not repo root)
+        manifest_path = snapshot_dir / "COMMIT_MANIFEST.md"
+        manifest_path.write_text(manifest.to_markdown())
+        
+        # Also write JSON manifest to snapshot
+        manifest_json_path = snapshot_dir / "manifest.json"
+        manifest_json_path.write_text(manifest.to_json())
+        
+        # Store manifest as artifact in DB
+        write_artifact(
+            run_id=run_id,
+            kind="commit_log",
+            content=manifest.to_json(),
+            model=None,
+        )
+        
+        # Update status to completed
+        update_run_status(run_id, "completed")
+        
+        return manifest
+        
+    finally:
+        # Always release lock
+        _release_lock(repo_path)
+
+
+# Task types required for a full pack commit
+PACK_TASK_TYPES = ["spec", "tracker", "prompts", "cursor_rules", "invariants"]
+
+# Mapping from task_type to the canonical paths they produce
+TASK_TYPE_TO_PATHS = {
+    "spec": ["spec/spec.yaml"],
+    "tracker": ["tracker/factory_tracker.yaml"],
+    "prompts": [
+        "prompts/step_template.md",
+        "prompts/review_template.md",
+        "prompts/patch_template.md",
+        "prompts/chair_synthesis_template.md",
+    ],
+    "cursor_rules": [
+        ".cursor/rules/00_global.md",
+        ".cursor/rules/10_invariants.md",
+    ],
+    "invariants": ["invariants/invariants.md"],
+}
+
+
+def commit_pack(
+    plan_run_id: UUID,
+    project_slug: str,
+    repo_path: Path,
+) -> CommitManifest:
+    """
+    Commit a full canonical pack to target repository (S14).
+    
+    Selects the latest approved Phase 2 outputs for each artifact type
+    (spec, tracker, prompts, cursor_rules, invariants) and writes them all
+    in a single commit operation.
+    
+    Args:
+        plan_run_id: The approved plan run ID (parent for all artifacts)
+        project_slug: Project namespace
+        repo_path: Target repository path
+        
+    Returns:
+        CommitManifest with details of written files
+        
+    Raises:
+        ValueError: If any artifact type is missing an approved run
+        RuntimeError: If lock cannot be acquired, repo is dirty, or not a git repo
+    """
+    import yaml
+    from agentic_mvp_factory.repo import (
+        get_run, get_artifacts, write_artifact, update_run_status,
+        create_run, get_latest_approved_run_by_task_type
+    )
+    
+    # Validate plan run exists
+    plan_run = get_run(plan_run_id)
+    if not plan_run:
+        raise ValueError(f"Plan run not found: {plan_run_id}")
+    
+    # Collect all approved runs for each task type
+    approved_runs = {}
+    missing_types = []
+    
+    for task_type in PACK_TASK_TYPES:
+        run = get_latest_approved_run_by_task_type(task_type, plan_run_id)
+        if run:
+            # Verify it has an output artifact
+            outputs = get_artifacts(run.id, kind="output")
+            if outputs:
+                approved_runs[task_type] = (run, outputs[0])
+            else:
+                missing_types.append(f"{task_type} (run {run.id} has no output artifact)")
+        else:
+            missing_types.append(task_type)
+    
+    if missing_types:
+        raise ValueError(
+            f"PACK COMMIT BLOCKED: Missing approved artifacts.\n"
+            f"  Missing: {missing_types}\n"
+            f"  Fix: Run the missing councils with --from-plan {plan_run_id} and approve them."
+        )
+    
+    # Build the unified write-set
+    files_to_write = {}  # path -> content
+    
+    for task_type, (run, artifact) in approved_runs.items():
+        content = artifact.content
+        
+        if task_type == "spec":
+            files_to_write["spec/spec.yaml"] = content
+            
+        elif task_type == "tracker":
+            files_to_write["tracker/factory_tracker.yaml"] = content
+            
+        elif task_type == "prompts":
+            # Parse YAML envelope and extract 4 prompt files
+            try:
+                envelope = yaml.safe_load(content)
+                outputs = envelope.get("outputs", {})
+                for path in TASK_TYPE_TO_PATHS["prompts"]:
+                    if path not in outputs:
+                        raise ValueError(f"Prompts envelope missing {path}")
+                    files_to_write[path] = outputs[path]
+            except yaml.YAMLError as e:
+                raise ValueError(f"Failed to parse prompts envelope: {e}")
+                
+        elif task_type == "cursor_rules":
+            # Parse YAML envelope and extract 2 rule files
+            try:
+                envelope = yaml.safe_load(content)
+                outputs = envelope.get("outputs", {})
+                for path in TASK_TYPE_TO_PATHS["cursor_rules"]:
+                    if path not in outputs:
+                        raise ValueError(f"Cursor rules envelope missing {path}")
+                    files_to_write[path] = outputs[path]
+            except yaml.YAMLError as e:
+                raise ValueError(f"Failed to parse cursor_rules envelope: {e}")
+                
+        elif task_type == "invariants":
+            files_to_write["invariants/invariants.md"] = content
+    
+    # Ensure repo path exists
+    repo_path = Path(repo_path).resolve()
+    repo_path.mkdir(parents=True, exist_ok=True)
+    
+    # === S02: Load Registry (single source of truth) ===
+    
+    source_registry_path = Path(REGISTRY_PATH)
+    registry, registry_error = parse_artifact_registry(source_registry_path)
+    
+    print(f"[S02] Registry loaded from: {registry.source}")
+    print(f"[S02] Canonical paths: {len(registry.canonical)}")
+    
+    if registry_error and registry.source == "fallback":
+        raise RuntimeError(
+            f"COMMIT BLOCKED: ARTIFACT_REGISTRY missing or unparsable.\n"
+            f"  Path: {source_registry_path.resolve()}\n"
+            f"  Error: {registry_error}\n"
+            f"  Fix: Ensure docs/ARTIFACT_REGISTRY.md exists with ## Canonical section."
+        )
+    
+    # === FAIL-SAFE CHECKS (S01: Commit Safety Rails) ===
+    
+    # 1. Verify target is a git repo
+    is_git, git_error = _is_git_repo(repo_path)
+    if not is_git:
+        raise RuntimeError(
+            f"COMMIT BLOCKED: Target path is not a git repository.\n"
+            f"  Reason: non-git\n"
+            f"  Path: {repo_path}\n"
+            f"  Detail: {git_error}\n"
+            f"  Fix: Initialize with 'git init'"
+        )
+    
+    # 2. Check for uncommitted changes (dirty repo)
+    has_changes, status_output = _has_uncommitted_changes(repo_path)
+    if has_changes:
+        raise RuntimeError(
+            f"COMMIT BLOCKED: Target repo has uncommitted changes.\n"
+            f"  Reason: dirty repo\n"
+            f"  Path: {repo_path}\n"
+            f"  Offending files:\n{status_output}\n"
+            f"  Fix: Commit or stash changes before running council commit."
+        )
+    
+    # 3. Check if registry needs to be written
+    registry_dest_path = "docs/ARTIFACT_REGISTRY.md"
+    registry_dest = repo_path / registry_dest_path
+    paths_to_write = list(files_to_write.keys())
+    if not registry_dest.exists():
+        paths_to_write.append(registry_dest_path)
+    
+    # 4. Validate all paths against registry allowlist
+    for path in paths_to_write:
+        if registry.is_forbidden(path):
+            raise ValueError(
+                f"COMMIT BLOCKED: {path} is forbidden.\n"
+                f"  Reason: forbidden path (from registry)\n"
+                f"  Forbidden (per docs/ARTIFACT_REGISTRY.md): {registry.forbidden}"
+            )
+        
+        if not registry.is_allowed(path):
+            raise ValueError(
+                f"COMMIT BLOCKED: {path} is not in allowlist.\n"
+                f"  Reason: non-canonical write (not in registry)\n"
+                f"  Offending paths: [{path}]\n"
+                f"  Allowed (per docs/ARTIFACT_REGISTRY.md): {registry.canonical}"
+            )
+    
+    # 5. Additive-only: fail if any destination already exists
+    all_canonical_paths = list(files_to_write.keys())
+    existing = _check_existing_files(repo_path, all_canonical_paths)
+    if existing:
+        raise ValueError(
+            f"COMMIT BLOCKED: Destination files already exist (additive-only mode).\n"
+            f"  Reason: overwrite\n"
+            f"  Offending files: {existing}\n"
+            f"  Fix: Remove these files or use a fresh repo to proceed."
+        )
+    
+    # === END FAIL-SAFE CHECKS ===
+    
+    # Create a new run for the pack commit
+    pack_run = create_run(
+        project_slug=project_slug,
+        task_type="commit_pack",
+        parent_run_id=plan_run_id,
+    )
+    pack_run_id = pack_run.id
+    
+    # Acquire lock
+    if not _acquire_lock(repo_path):
+        raise RuntimeError(f"Cannot acquire lock - another commit may be in progress. Check {repo_path / LOCK_FILE}")
+    
+    try:
+        # Update status to committing
+        update_run_status(pack_run_id, "committing")
+        
+        # Prepare manifest
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        manifest = CommitManifest(
+            run_id=str(pack_run_id),
+            timestamp=timestamp,
+        )
+        
+        # Create snapshot directory
+        snapshot_dir = repo_path / "versions" / f"{timestamp}_{pack_run_id}"
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        manifest.snapshot_path = str(snapshot_dir.relative_to(repo_path))
+        
+        # Write all files
+        for file_path, content in files_to_write.items():
+            # Write to stable location (ensure parent dirs exist)
+            dest_file = repo_path / file_path
+            dest_file.parent.mkdir(parents=True, exist_ok=True)
+            dest_file.write_text(content)
+            
+            # Write to snapshot
+            snapshot_file = snapshot_dir / file_path
+            snapshot_file.parent.mkdir(parents=True, exist_ok=True)
+            snapshot_file.write_text(content)
+            
+            # Record in manifest
+            manifest.stable_paths_written.append(file_path)
+            manifest.file_hashes[file_path] = _compute_sha256(content)
+        
+        # Copy docs/ARTIFACT_REGISTRY.md if missing
+        if not registry_dest.exists():
+            factory_registry = Path(REGISTRY_PATH)
+            if factory_registry.exists():
+                registry_content = factory_registry.read_text()
+                registry_dest.parent.mkdir(parents=True, exist_ok=True)
+                registry_dest.write_text(registry_content)
+                
+                manifest.stable_paths_written.append(registry_dest_path)
+                manifest.file_hashes[registry_dest_path] = _compute_sha256(registry_content)
+                
+                snapshot_registry = snapshot_dir / registry_dest_path
+                snapshot_registry.parent.mkdir(parents=True, exist_ok=True)
+                snapshot_registry.write_text(registry_content)
+        
+        # Write manifest to snapshot directory
+        manifest_path = snapshot_dir / "COMMIT_MANIFEST.md"
+        manifest_path.write_text(manifest.to_markdown())
+        
+        manifest_json_path = snapshot_dir / "manifest.json"
+        manifest_json_path.write_text(manifest.to_json())
+        
+        # Store commit manifest as artifact
+        write_artifact(
+            run_id=pack_run_id,
+            kind="commit_manifest",
+            content=manifest.to_json(),
+            model=None,
+        )
+        
+        # Update status to completed
+        update_run_status(pack_run_id, "completed")
+        
+        return manifest
+        
+    finally:
+        # Always release lock
+        _release_lock(repo_path)

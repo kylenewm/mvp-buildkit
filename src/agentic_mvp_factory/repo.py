@@ -345,3 +345,50 @@ def get_approval(run_id: UUID) -> Optional[Approval]:
         created_at=row["created_at"],
     )
 
+
+def get_latest_approved_run_by_task_type(
+    task_type: str,
+    parent_run_id: UUID,
+) -> Optional[Run]:
+    """
+    Get the latest approved run for a given task_type and parent_run_id.
+    
+    An approved run has status IN ('ready_to_commit', 'completed').
+    
+    Args:
+        task_type: The task type (spec, tracker, prompts, cursor_rules, invariants)
+        parent_run_id: The parent plan run ID
+        
+    Returns:
+        The latest approved Run or None if not found
+    """
+    parent_id_str = str(parent_run_id)
+    
+    with get_cursor(commit=False) as cursor:
+        cursor.execute(
+            """
+            SELECT id, project_slug, task_type, status, parent_run_id, created_at, updated_at
+            FROM runs
+            WHERE task_type = %s
+              AND parent_run_id = %s
+              AND status IN ('ready_to_commit', 'completed')
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (task_type, parent_id_str),
+        )
+        row = cursor.fetchone()
+    
+    if not row:
+        return None
+    
+    return Run(
+        id=row["id"],
+        project_slug=row["project_slug"],
+        task_type=row["task_type"],
+        status=row["status"],
+        parent_run_id=row["parent_run_id"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
