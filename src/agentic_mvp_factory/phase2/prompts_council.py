@@ -17,10 +17,12 @@ from uuid import UUID
 
 import yaml
 
+from agentic_mvp_factory.artifact_deps import validate_allowed_inputs
 from agentic_mvp_factory.model_client import Message, get_openrouter_client, traced_complete
 from agentic_mvp_factory.repo import (
     create_run,
     get_artifacts,
+    get_latest_approved_run_by_task_type,
     get_run,
     update_run_status,
     write_artifact,
@@ -46,6 +48,7 @@ Your job is to produce a YAML envelope containing EXACTLY 4 prompt templates.
 
 CRITICAL FORMAT REQUIREMENTS:
 - Output ONLY valid YAML (NO markdown fences, NO ``` anywhere, NO explanations)
+- Do NOT use single quotes (') or backticks (`) inside YAML strings - they break parsing
 - The YAML must have this EXACT structure:
 
 schema_version: "0.1"
@@ -103,6 +106,7 @@ CRITICAL FORMAT REQUIREMENTS:
 - Output ONLY raw YAML (NO markdown fences, NO ``` anywhere, NO explanations)
 - Start directly with YAML content, not with ```yaml
 - The output must be valid YAML that can be parsed directly
+- Do NOT use single quotes (') or backticks (`) inside YAML strings - they break parsing
 
 REQUIRED STRUCTURE (use EXACTLY these keys):
 schema_version: "0.1"
@@ -134,7 +138,9 @@ Output the complete YAML envelope and NOTHING else."""
 def _generate_prompts_draft(
     run_id: str,
     model: str,
-    plan_content: str,
+    spec_content: str,
+    invariants_content: str,
+    tracker_content: str,
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Generate a single prompts envelope draft.
     
@@ -149,13 +155,22 @@ def _generate_prompts_draft(
         Message(role="system", content=PROMPTS_SYSTEM_PROMPT),
         Message(
             role="user",
-            content=f"""## Approved Plan
+            content=f"""## Project Spec (spec/spec.yaml)
 
-{plan_content}
+{spec_content}
+
+## Project Invariants (invariants/invariants.md)
+
+{invariants_content}
+
+## Project Tracker (tracker/factory_tracker.yaml)
+
+{tracker_content}
 
 ---
 
 Generate the complete prompts envelope with all 4 templates.
+Templates should reference the tracker steps and enforce invariants.
 Use updated_at: {today}
 Output ONLY valid YAML.""",
         ),
@@ -195,7 +210,9 @@ Output ONLY valid YAML.""",
 def _generate_prompts_critique(
     run_id: str,
     model: str,
-    plan_content: str,
+    spec_content: str,
+    invariants_content: str,
+    tracker_content: str,
     drafts_text: str,
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Generate a prompts critique.
@@ -209,9 +226,17 @@ def _generate_prompts_critique(
         Message(role="system", content=PROMPTS_CRITIQUE_PROMPT),
         Message(
             role="user",
-            content=f"""## Approved Plan
+            content=f"""## Project Spec (spec/spec.yaml)
 
-{plan_content}
+{spec_content}
+
+## Project Invariants (invariants/invariants.md)
+
+{invariants_content}
+
+## Project Tracker (tracker/factory_tracker.yaml)
+
+{tracker_content}
 
 ## Prompts Envelope Drafts
 
@@ -277,29 +302,67 @@ def run_prompts_council(
     if len(models) < 2:
         raise ValueError(f"At least 2 models required, got {len(models)}")
     
-    # 1. Load and validate the plan
+    # 1. Validate parent plan run exists and is approved
     plan_run = get_run(plan_run_id)
     if not plan_run:
         raise ValueError(f"Plan run not found: {plan_run_id}")
     
-    # Check plan is approved (ready_to_commit or completed)
     if plan_run.status not in ("ready_to_commit", "completed"):
         raise ValueError(
             f"Plan run is not approved (status: {plan_run.status}). "
             f"Approve it first with: council approve {plan_run_id} --approve"
         )
     
-    # Get the plan artifact
-    plan_artifacts = get_artifacts(plan_run_id, kind="plan")
-    if not plan_artifacts:
-        # Fallback to synthesis if plan artifact doesn't exist
-        plan_artifacts = get_artifacts(plan_run_id, kind="synthesis")
-    if not plan_artifacts:
-        raise ValueError(f"No plan artifact found for run: {plan_run_id}")
+    # 2. Load SPEC artifact
+    spec_run = get_latest_approved_run_by_task_type(plan_run_id, "spec")
+    if not spec_run:
+        raise ValueError(
+            f"No approved spec run found for plan {plan_run_id}. "
+            f"Run spec council first."
+        )
     
-    plan_content = plan_artifacts[0].content
+    spec_artifacts = get_artifacts(spec_run.id, kind="output")
+    if not spec_artifacts:
+        raise ValueError(f"No spec output artifact found for spec run: {spec_run.id}")
     
-    # 2. Create new run for prompts generation
+    spec_content = spec_artifacts[0].content
+    
+    # 3. Load INVARIANTS artifact
+    inv_run = get_latest_approved_run_by_task_type(plan_run_id, "invariants")
+    if not inv_run:
+        raise ValueError(
+            f"No approved invariants run found for plan {plan_run_id}. "
+            f"Run invariants council first."
+        )
+    
+    inv_artifacts = get_artifacts(inv_run.id, kind="output")
+    if not inv_artifacts:
+        raise ValueError(f"No invariants output artifact found for invariants run: {inv_run.id}")
+    
+    invariants_content = inv_artifacts[0].content
+    
+    # 4. Load TRACKER artifact
+    tracker_run = get_latest_approved_run_by_task_type(plan_run_id, "tracker")
+    if not tracker_run:
+        raise ValueError(
+            f"No approved tracker run found for plan {plan_run_id}. "
+            f"Run tracker council first."
+        )
+    
+    tracker_artifacts = get_artifacts(tracker_run.id, kind="output")
+    if not tracker_artifacts:
+        raise ValueError(f"No tracker output artifact found for tracker run: {tracker_run.id}")
+    
+    tracker_content = tracker_artifacts[0].content
+    
+    # Validate inputs against dependency law (prompts takes spec + invariants + tracker)
+    validate_allowed_inputs("prompts", {
+        "spec": f"kind=output from spec run {spec_run.id}",
+        "invariants": f"kind=output from invariants run {inv_run.id}",
+        "tracker": f"kind=output from tracker run {tracker_run.id}",
+    })
+    
+    # 5. Create new run for prompts generation
     prompts_run = create_run(
         project_slug=project_slug,
         task_type="prompts",
@@ -307,11 +370,11 @@ def run_prompts_council(
     )
     run_id = str(prompts_run.id)
     
-    # Store the plan as a reference artifact
+    # Store the inputs as reference artifacts
     write_artifact(
         run_id=prompts_run.id,
         kind="packet",
-        content=f"# Source Plan (from run {plan_run_id})\n\n{plan_content}",
+        content=f"# Source Spec\n\n{spec_content}\n\n---\n\n# Source Invariants\n\n{invariants_content}\n\n---\n\n# Source Tracker\n\n{tracker_content}",
         model=None,
     )
     
@@ -323,7 +386,7 @@ def run_prompts_council(
     draft_ids: List[str] = []
     with ThreadPoolExecutor(max_workers=len(models)) as executor:
         futures = {
-            executor.submit(_generate_prompts_draft, run_id, model, plan_content): model
+            executor.submit(_generate_prompts_draft, run_id, model, spec_content, invariants_content, tracker_content): model
             for model in models
         }
         
@@ -350,7 +413,7 @@ def run_prompts_council(
     critique_ids: List[str] = []
     with ThreadPoolExecutor(max_workers=len(models)) as executor:
         futures = {
-            executor.submit(_generate_prompts_critique, run_id, model, plan_content, drafts_text): model
+            executor.submit(_generate_prompts_critique, run_id, model, spec_content, invariants_content, tracker_content, drafts_text): model
             for model in models
         }
         
@@ -378,9 +441,17 @@ def run_prompts_council(
         Message(role="system", content=PROMPTS_CHAIR_PROMPT),
         Message(
             role="user",
-            content=f"""## Approved Plan
+            content=f"""## Project Spec (spec/spec.yaml)
 
-{plan_content}
+{spec_content}
+
+## Project Invariants (invariants/invariants.md)
+
+{invariants_content}
+
+## Project Tracker (tracker/factory_tracker.yaml)
+
+{tracker_content}
 
 ## Prompts Envelope Drafts
 
@@ -393,6 +464,7 @@ def run_prompts_council(
 ---
 
 Produce the final prompts envelope with all 4 templates.
+Templates should reference tracker steps and enforce invariants.
 Use updated_at: {today}
 Output ONLY valid YAML, no markdown fences.""",
         ),

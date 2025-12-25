@@ -1,6 +1,8 @@
 # Context State — Agentic MVP Factory Implementation Status
 
 **Generated:** 2025-12-24  
+**Last Updated:** 2025-12-25 (Artifact Dependency Law added)  
+**Build ID:** B01  
 **Purpose:** Comprehensive status of all phases and their implementation state
 
 ---
@@ -54,18 +56,26 @@ Lock the build you are about to do and bound the research needed before any "pla
 #### Current Workflow
 
 ```bash
-# Step 1: Iterate in draft mode
+# Step 1: Generate drafts from prompt (NEW!)
+council intake --project <slug> --prompt "Build a CLI that..." --mode draft
+
+# Step 2: Run web research to fill findings (NEW!)
+council research --project <slug> --provider tavily --mark-sufficient
+
+# Step 3: Iterate in draft mode
 council phase-1-guard --mode draft
 
-# Step 2: Complete research, remove TBDs
-# Edit phase_minus_1/research_snapshot.yaml
-
-# Step 3: Validate in commit mode
+# Step 4: Validate in commit mode
 council phase-1-guard --mode commit
 
-# Step 4: Use in planning (optional but recommended)
+# Step 5: Use in planning (optional but recommended)
 council run plan --phase-1-check --project test --packet ... --models ... --chair ...
 ```
+
+#### New Capabilities (Added Dec 25)
+
+1. **`council intake`**: Generate draft `build_candidate.yaml` and `research_snapshot.yaml` from a prompt using LLM.
+2. **`council research`**: Bounded web search (Tavily/Exa) to fill research findings automatically.
 
 #### What Phase -1 Does NOT Do (Correctly)
 - ❌ Does not write `spec/spec.yaml`
@@ -84,7 +94,7 @@ council run plan --phase-1-check --project test --packet ... --models ... --chai
 ### Purpose
 Inject bounded context into planning prompts without bloating. Provides a curated, factual summary of build commitment, constraints, research conclusions, and unknowns.
 
-### Implementation Status: ⚠️ **PARTIALLY IMPLEMENTED**
+### Implementation Status: ✅ **FULLY IMPLEMENTED**
 
 #### What's Implemented
 
@@ -99,36 +109,25 @@ Inject bounded context into planning prompts without bloating. Provides a curate
    - ✅ Assumptions
    - ✅ Unknowns (carry forward)
 
-#### What's Missing
+3. **CLI Integration** (Implemented Dec 25):
+   - ✅ `--context <path>` flag in `council run plan` command
+   - ✅ Context pack injected into Draft, Critique, and Chair prompts
+   - ✅ Context appears as `## Context Pack (Phase 0 Lite)` section
 
-1. **CLI Integration**:
-   - ❌ No `--context` flag in `council run plan` command
-   - ❌ Context pack is not injected into planning prompts
-   - ❌ Planning prompts only use `packet_content`, not context pack
+#### Current Workflow
 
-2. **Prompt Integration**:
-   - ❌ `graph.py` draft generation doesn't include context pack
-   - ❌ Chair synthesis doesn't include context pack
-   - ❌ No mechanism to pass context to model calls
-
-#### Planned Implementation (Per B01 Plan S02)
-
-According to `plan/B01_plan.yaml` Step S02:
-- **Title**: "Add --context and --dry-run flags to council run plan"
-- **Description**: "Accept context pack file; add --dry-run to emit artifacts without persistence"
-- **Files to touch**: `src/agentic_mvp_factory/cli.py`, `src/agentic_mvp_factory/graph.py`
-- **Verification**: `council run plan --context phase_0/context_pack_lite.md --dry-run`
-- **Done when**: "Context injected in prompts; --dry-run skips persistence"
-
-#### Current Workflow Gap
-
-```
-Current:  Packet → Council → Plan
-Should be: Phase -1 → Phase 0 (context pack) → Packet + Context → Council → Plan
+```bash
+# Context injection in planning
+council run plan \
+  --project <slug> \
+  --packet council/packets/plan_packet.md \
+  --context phase_0/context_pack_lite.md \
+  --models m1,m2 \
+  --chair m1
 ```
 
 #### Status
-**NOT INTEGRATED** — Phase 0 files exist and contain useful context, but they are not automatically injected into the planning workflow. This is a planned feature (S02) that needs implementation.
+**FULLY INTEGRATED** — The `--context` flag works end-to-end. Context is injected into all planning prompts.
 
 ---
 
@@ -207,15 +206,14 @@ council approve <run_id> --edit
 council commit <run_id> --repo <path>
 ```
 
-#### Missing Features (Per B01 Plan)
+#### Status (Updated Dec 25)
 
 According to `plan/B01_plan.yaml`:
-- ❌ **S02**: `--context` flag to inject Phase 0 context pack (not implemented)
-- ❌ **S02**: `--dry-run` flag to skip persistence (not implemented)
+- ✅ **S02**: `--context` flag to inject Phase 0 context pack (IMPLEMENTED)
+- ⚠️ **S02**: `--dry-run` flag to skip persistence (not yet implemented)
 - ✅ **S03**: Plan artifact storage (already implemented)
 
-#### Status
-**FULLY FUNCTIONAL** — Phase 1 planning council works end-to-end. The core workflow is complete and production-ready. Missing features are enhancements (context injection, dry-run) that don't block basic functionality.
+**FULLY FUNCTIONAL** — Phase 1 planning council works end-to-end with context injection.
 
 ---
 
@@ -224,18 +222,21 @@ According to `plan/B01_plan.yaml`:
 ### Purpose
 Turn an approved plan into a **canonical artifact pack** you can execute with. Each artifact is generated sequentially via council (drafts + critiques + chair synthesis) with HITL approval before proceeding to the next.
 
-### Implementation Status: ⚠️ **PARTIALLY IMPLEMENTED**
+### Implementation Status: ✅ **FULLY IMPLEMENTED** (Dec 25)
 
-#### What Should Be Generated (Per README)
-
-According to README (lines 268-287), Phase 2 should generate artifacts in this order:
+#### All Artifact Councils Complete
 
 1. **Spec update** (`spec/spec.yaml`) ✅ **IMPLEMENTED**
-2. **Tracker steps** (`tracker/factory_tracker.yaml`) ❌ **NOT IMPLEMENTED**
-3. **Step prompts** (`prompts/step_template.md` and variants) ❌ **NOT IMPLEMENTED**
-4. **Review + patch prompts** (`prompts/review_template.md`, `prompts/patch_template.md`) ❌ **NOT IMPLEMENTED**
-5. **Cursor rules** (`.cursor/rules/00_global.md`, `.cursor/rules/10_invariants.md`) ❌ **NOT IMPLEMENTED**
-6. **Invariants** (`invariants/invariants.md`) ❌ **NOT IMPLEMENTED**
+2. **Tracker steps** (`tracker/factory_tracker.yaml`) ✅ **IMPLEMENTED**
+3. **Prompts** (4 files via YAML envelope) ✅ **IMPLEMENTED**
+   - `prompts/step_template.md`
+   - `prompts/review_template.md`
+   - `prompts/patch_template.md`
+   - `prompts/chair_synthesis_template.md`
+4. **Cursor rules** (2 files via YAML envelope) ✅ **IMPLEMENTED**
+   - `.cursor/rules/00_global.md`
+   - `.cursor/rules/10_invariants.md`
+5. **Invariants** (`invariants/invariants.md`) ✅ **IMPLEMENTED**
 
 #### What's Implemented: Spec Council
 
@@ -263,135 +264,169 @@ According to README (lines 268-287), Phase 2 should generate artifacts in this o
    - ✅ Can be committed via `council commit <run_id> --repo <path>`
    - ✅ Spec council outputs are written to `spec/spec.yaml` on commit
 
-#### What's Missing: Other Artifact Councils
+#### All Councils Implemented
 
-1. **Tracker Council**:
-   - ❌ No `council run tracker` command
-   - ❌ No tracker council implementation
-   - ❌ No YAML generation for `tracker/factory_tracker.yaml`
+1. **Tracker Council** (`src/agentic_mvp_factory/phase2/tracker_council.py`):
+   - ✅ `council run tracker --from-plan <id> --project <slug> --models m1,m2 --chair m1`
+   - ✅ Generates `tracker/factory_tracker.yaml`
+   - ✅ Validates `schema_version` and `steps` list
+   - ✅ **Loads spec + invariants** (enforced dependency chain)
 
-2. **Prompts Council**:
-   - ❌ No `council run prompts` command
-   - ❌ No prompt template generation
-   - ❌ No support for multiple prompt files
+2. **Prompts Council** (`src/agentic_mvp_factory/phase2/prompts_council.py`):
+   - ✅ `council run prompts --from-plan <id> --project <slug> --models m1,m2 --chair m1`
+   - ✅ Generates YAML envelope with 4 prompt templates
+   - ✅ Commit unpacks envelope to individual files
+   - ✅ **Loads spec + invariants + tracker** (enforced dependency chain)
 
-3. **Cursor Rules Council**:
-   - ❌ No `council run cursor-rules` command
-   - ❌ No Cursor rules generation
+3. **Cursor Rules Council** (`src/agentic_mvp_factory/phase2/cursor_rules_council.py`):
+   - ✅ `council run cursor-rules --from-plan <id> --project <slug> --models m1,m2 --chair m1`
+   - ✅ Generates YAML envelope with 2 rule files
+   - ✅ Commit unpacks envelope to `.cursor/rules/` directory
+   - ✅ **Loads spec + invariants** (enforced dependency chain)
 
-4. **Invariants Council**:
-   - ❌ No `council run invariants` command
-   - ❌ No invariants markdown generation
+4. **Invariants Council** (`src/agentic_mvp_factory/phase2/invariants_council.py`):
+   - ✅ `council run invariants --from-plan <id> --project <slug> --models m1,m2 --chair m1`
+   - ✅ Generates `invariants/invariants.md` (plain markdown)
+   - ✅ **Loads spec** (enforced dependency chain)
 
-#### Current Workflow
+#### Artifact Dependency Law (V0) — Enforced
+
+**Dependency Chain (Logical Flow):**
+```
+Plan → Spec → Invariants → Tracker → Prompts
+                    ↘ Cursor-Rules
+```
+
+**Enforcement Mechanism** (`src/agentic_mvp_factory/artifact_deps.py`):
+- ✅ Centralized validation module (`validate_allowed_inputs()`)
+- ✅ Each council validates inputs before any LLM calls
+- ✅ Prevents skipping the dependency chain (e.g., tracker cannot read plan directly)
+- ✅ Blocks forbidden inputs (context packs, generated outputs as inputs)
+- ✅ Enumerated error messages (lists ALL violations)
+
+**Allowed Inputs Per Council:**
+- **spec**: `plan` only
+- **invariants**: `spec` only (not plan directly)
+- **tracker**: `spec` + `invariants` (not plan directly)
+- **prompts**: `spec` + `invariants` + `tracker`
+- **cursor_rules**: `spec` + `invariants` (not tracker)
+
+**Forbidden (All Councils):**
+- ❌ `phase_0/*` (context packs are Phase 1 only)
+- ❌ `.cursor/rules/*` (outputs cannot be inputs)
+- ❌ `prompts/*` (outputs cannot be inputs)
+
+**Tests:**
+- ✅ 21 unit tests in `tests/test_artifact_deps.py`
+- ✅ Self-test runner: `python -m agentic_mvp_factory.artifact_deps`
+
+#### Current Workflow (Full Pipeline)
+
+**Important:** Phase 2 councils must run in dependency order. Each council automatically loads its required inputs from previous approved runs.
 
 ```bash
 # Step 1: Approve plan (Phase 1)
 council approve <plan_run_id> --approve
 
-# Step 2: Generate spec (Phase 2, artifact 1)
-council run spec \
-  --from-plan <plan_run_id> \
-  --project <slug> \
-  --models <m1>,<m2>,<m3> \
-  --chair <m1>
-
-# Step 3: Approve spec
+# Step 2: Run all Phase 2 councils sequentially (dependency-enforced)
+# Spec: reads plan
+council run spec --from-plan <plan_run_id> --project <slug> --models m1,m2 --chair m1
 council approve <spec_run_id> --approve
 
-# Step 4: Commit spec
-council commit <spec_run_id> --repo <path>
+# Invariants: reads spec (dependency enforced)
+council run invariants --from-plan <plan_run_id> --project <slug> --models m1,m2 --chair m1
+council approve <invariants_run_id> --approve
 
-# Step 5: Generate other artifacts (NOT IMPLEMENTED)
-# council run tracker --from-plan <plan_run_id> ...
-# council run prompts --from-plan <plan_run_id> ...
-# etc.
+# Tracker: reads spec + invariants (dependency enforced)
+council run tracker --from-plan <plan_run_id> --project <slug> --models m1,m2 --chair m1
+council approve <tracker_run_id> --approve
+
+# Prompts: reads spec + invariants + tracker (dependency enforced)
+council run prompts --from-plan <plan_run_id> --project <slug> --models m1,m2 --chair m1
+council approve <prompts_run_id> --approve
+
+# Cursor Rules: reads spec + invariants (dependency enforced)
+council run cursor-rules --from-plan <plan_run_id> --project <slug> --models m1,m2 --chair m1
+council approve <rules_run_id> --approve
+
+# Step 3: Commit full pack in one go (NEW!)
+council commit-pack --project <slug> --from-plan <plan_run_id> --repo <path>
 ```
 
-#### Implementation Pattern (For Future Artifacts)
+**Note:** If you try to run a council before its dependencies are approved, you'll get a clear error:
+```
+ValueError: No approved spec run found for plan <id>. Run spec council first.
+```
 
-The spec council (`spec_council.py`) provides a template for implementing other artifact councils:
+#### Automation Script
 
-1. Create new module: `src/agentic_mvp_factory/phase2/<artifact>_council.py`
-2. Implement council function: `run_<artifact>_council(plan_run_id, project_slug, models, chair_model)`
-3. Add CLI command: `@run.command("<artifact>")` in `cli.py`
-4. Follow same pattern:
-   - Load approved plan
-   - Create new run with `task_type="<artifact>"`
-   - Generate drafts (parallel)
-   - Generate critiques (parallel)
-   - Chair synthesis
-   - Validate output format
-   - Store as `kind="output"`
-   - Set status to `waiting_for_approval`
+```bash
+# Run the full Phase 2 pipeline with one script
+scripts/run_phase2_pipeline.sh <approved_plan_run_id> "m1,m2" m1
+```
+
+#### Commit Safety Rails (S01, S02)
+
+All commits enforce:
+- ✅ Target must be a Git repo
+- ✅ Fail if dirty (uncommitted changes)
+- ✅ Registry-driven allowlist (`docs/ARTIFACT_REGISTRY.md`)
+- ✅ Additive-only (no overwrites by default)
+- ✅ Snapshots written to `versions/<timestamp>_<run_id>/`
+- ✅ Manifest written with every commit
 
 #### Status
-**PARTIALLY FUNCTIONAL** — Phase 2 infrastructure exists and works for spec generation. The pattern is established and can be replicated for other artifacts. Only 1 of 6 planned artifact types is implemented.
+**FULLY FUNCTIONAL** — All 5 Phase 2 artifact councils are implemented and tested. Full pack commit verified on `tmp/toy_repo`.
 
 ---
 
 ## Summary: Overall System Status
 
-### Fully Implemented Phases
-- ✅ **Phase -1**: Build commitment + research bounds guard
+### All Phases Complete! ✅
+- ✅ **Phase -1**: Build commitment + research bounds guard (+ `intake` + `research` commands)
+- ✅ **Phase 0**: Context pack integration (`--context` flag)
 - ✅ **Phase 1**: Planning council (full workflow)
-
-### Partially Implemented Phases
-- ⚠️ **Phase 0**: Context pack files exist but not integrated into planning flow
-- ⚠️ **Phase 2**: Spec council implemented; 5 other artifact councils missing
+- ✅ **Phase 2**: All 5 artifact councils (Spec, Tracker, Prompts, Cursor Rules, Invariants)
 
 ### Integration Status
 
 ```
 Phase -1 → Phase 0 → Phase 1 → Phase 2
-   ✅         ⚠️        ✅        ⚠️
+   ✅         ✅        ✅        ✅
 ```
 
 - **Phase -1 → Phase 1**: ✅ Integrated (optional `--phase-1-check` flag)
-- **Phase 0 → Phase 1**: ❌ Not integrated (no `--context` flag)
-- **Phase 1 → Phase 2**: ✅ Integrated (spec council reads plan artifacts)
-
-### Key Missing Features
-
-1. **Phase 0 Integration** (Plan S02):
-   - `--context` flag for `council run plan`
-   - Context injection into planning prompts
-   - `--dry-run` flag for testing without persistence
-
-2. **Phase 2 Artifact Councils**:
-   - Tracker council (`tracker/factory_tracker.yaml`)
-   - Prompts council (step_template, review_template, patch_template)
-   - Cursor rules council (`.cursor/rules/*.md`)
-   - Invariants council (`invariants/invariants.md`)
+- **Phase 0 → Phase 1**: ✅ Integrated (`--context` flag)
+- **Phase 1 → Phase 2**: ✅ Integrated (all councils read plan artifacts)
 
 ### Workflow Completeness
 
-**Current End-to-End Flow:**
+**Full End-to-End Flow (VERIFIED):**
 ```
-Phase -1 guard → Planning council → Approve plan → Spec council → Approve spec → Commit spec
-     ✅              ✅                  ✅            ✅              ✅           ✅
-```
+Intake → Research → Phase -1 guard → Context pack → Planning council → Approve plan → 
+  ✅        ✅            ✅              ✅               ✅                 ✅
 
-**Target End-to-End Flow:**
-```
-Phase -1 guard → Context pack → Planning council → Approve plan → 
-     ✅              ⚠️              ✅                  ✅
+→ Spec council → Approve → Tracker council → Approve → Prompts council → Approve →
+       ✅           ✅            ✅              ✅            ✅            ✅
 
-→ Spec council → Approve → Tracker council → Approve → Prompts council → 
-     ✅            ✅          ❌              ❌          ❌
-
-→ Approve → Cursor rules council → Approve → Invariants council → Approve → 
-   ❌            ❌                    ❌            ❌
-
-→ Full artifact pack commit
-   ⚠️
+→ Cursor rules council → Approve → Invariants council → Approve → Full pack commit
+          ✅                ✅              ✅              ✅            ✅
 ```
 
-### Recommendations
+### New CLI Commands (Dec 25)
 
-1. **Immediate Priority**: Implement Phase 0 context injection (Plan S02) to improve plan quality
-2. **Next Priority**: Implement remaining Phase 2 artifact councils following the spec council pattern
-3. **Future Enhancement**: Add `--dry-run` mode for testing workflows without persistence
+| Command | Description |
+| :--- | :--- |
+| `council intake` | Generate draft Phase -1 YAMLs from a prompt |
+| `council research` | Run web search (Tavily/Exa) to fill research snapshot |
+| `council commit-pack` | Commit ALL latest approved Phase 2 outputs in one operation |
+| `council exec-aid` | Generate a step-specific Cursor prompt from the tracker |
+
+### Remaining Enhancements (Nice-to-Have)
+
+1. `--dry-run` flag for testing without persistence
+2. Step execution from tracker (`council exec --step S01`)
+3. E2E automated tests with mocked models
 
 ---
 
@@ -399,26 +434,43 @@ Phase -1 guard → Context pack → Planning council → Approve plan →
 
 ### Phase -1
 - Guard: `src/agentic_mvp_factory/phase_minus_1/guard.py`
-- CLI: `src/agentic_mvp_factory/cli.py` (lines 1190-1299)
+- Intake: `src/agentic_mvp_factory/phase_minus_1/intake.py`
+- Research: `src/agentic_mvp_factory/research_runner.py`
+- Search Clients: `src/agentic_mvp_factory/search_clients.py`
 - Files: `phase_minus_1/build_candidate.yaml`, `phase_minus_1/research_snapshot.yaml`
 - Schemas: `schemas/build_candidate.schema.json`, `schemas/research_snapshot.schema.json`
 
 ### Phase 0
 - Files: `phase_0/context_pack_lite.md`, `phase_0/spec_lite.yaml`
-- Integration: Not yet implemented (planned in Plan S02)
+- Integration: `--context` flag in `cli.py`, injection in `graph.py`
 
 ### Phase 1
 - Graph: `src/agentic_mvp_factory/graph.py`
-- CLI: `src/agentic_mvp_factory/cli.py` (lines 144-277)
-- Approval: `src/agentic_mvp_factory/cli.py` (lines 732-920)
+- CLI: `src/agentic_mvp_factory/cli.py`
 
 ### Phase 2
 - Spec Council: `src/agentic_mvp_factory/phase2/spec_council.py`
-- CLI: `src/agentic_mvp_factory/cli.py` (lines 280-395)
-- Other councils: Not yet implemented
+- Tracker Council: `src/agentic_mvp_factory/phase2/tracker_council.py`
+- Prompts Council: `src/agentic_mvp_factory/phase2/prompts_council.py`
+- Cursor Rules Council: `src/agentic_mvp_factory/phase2/cursor_rules_council.py`
+- Invariants Council: `src/agentic_mvp_factory/phase2/invariants_council.py`
+- Dependency Enforcement: `src/agentic_mvp_factory/artifact_deps.py` (Artifact Dependency Law)
+- Commit Writer: `src/agentic_mvp_factory/repo_writer.py`
+- Exec Aid Generator: `src/agentic_mvp_factory/exec_aid.py`
+
+### Scripts
+- Drift Checker: `scripts/check_artifacts.py`
+- Toy Dogfood: `scripts/toy_dogfood.sh`
+- Phase 2 Pipeline: `scripts/run_phase2_pipeline.sh`
+
+### Tests
+- Artifact Dependency Tests: `tests/test_artifact_deps.py` (21 tests)
+
+### Registry
+- Artifact Registry: `docs/ARTIFACT_REGISTRY.md` (Single Source of Truth for allowed/forbidden paths)
 
 ---
 
-**Last Updated:** 2025-12-24  
-**Next Review:** After Plan S02-S08 implementation
+**Last Updated:** 2025-12-25  
+**Status:** ✅ V1 Complete — All phases implemented and verified
 

@@ -11,6 +11,7 @@ from uuid import UUID
 
 import yaml
 
+from agentic_mvp_factory.artifact_deps import validate_allowed_inputs
 from agentic_mvp_factory.model_client import Message, get_openrouter_client, traced_complete
 from agentic_mvp_factory.repo import (
     create_run,
@@ -31,6 +32,7 @@ Your job is to produce a valid YAML document for spec/spec.yaml based on the app
 
 CRITICAL FORMAT REQUIREMENTS:
 - Output ONLY valid YAML (NO markdown fences, NO ``` anywhere, NO explanations)
+- Do NOT use single quotes (') or backticks (`) inside YAML strings - they break parsing
 - The YAML must start with these EXACT top-level keys in this order:
   schema_version: "0.1"
   updated_at: <today's date as YYYY-MM-DD>
@@ -70,6 +72,7 @@ CRITICAL FORMAT REQUIREMENTS:
 - Output ONLY raw YAML (NO markdown fences, NO ``` anywhere, NO explanations)
 - Start directly with YAML content, not with ```yaml
 - The output must be valid YAML that can be written directly to a file
+- Do NOT use single quotes (') or backticks (`) inside YAML strings - they break parsing
 
 REQUIRED STRUCTURE (use these exact top-level keys):
 schema_version: "0.1"
@@ -259,6 +262,11 @@ def run_spec_council(
         raise ValueError(f"No plan artifact found for run: {plan_run_id}")
     
     plan_content = plan_artifacts[0].content
+    
+    # Validate inputs against dependency law (spec only takes plan)
+    validate_allowed_inputs("spec", {
+        "plan": f"kind={plan_artifacts[0].kind} from run {plan_run_id}",
+    })
     
     # 2. Create new run for spec generation
     spec_run = create_run(

@@ -1,30 +1,40 @@
 schema_version: "0.1"
 build_id: "B01"
-state_version: 1
+state_version: 2
 
-title: "TBD"
-problem: "TBD"
-target_user: "TBD"
+title: "Agentic MVP Factory CLI"
+problem: "Manual coordination of LLM council workflows is error-prone and loses state across sessions"
+target_user: "Developers building AI-assisted coding tools with structured review workflows"
 
-wow_slice: "TBD"          # must be demo-able in <30s
+wow_slice: "Run council plan, approve, and commit artifacts to a target repo in under 60 seconds"
 done_enough:
-  - "TBD"
+  - "CLI runs planning council with multiple models"
+  - "Artifacts persist to Postgres across sessions"
+  - "Approved plans can be committed to target repos"
+  - "Phase -1 guard validates inputs before planning"
 
 constraints:
-  - "TBD"
+  - "No secrets in repo"
+  - "CLI-first, no web UI required"
+  - "OpenRouter API for model access"
 
 non_goals:
-  - "TBD"
+  - "Real-time collaboration features"
+  - "GUI or web interface"
+  - "Auto-execution without human approval"
 
 risks:
-  - "TBD"
+  - "LLM output quality varies across models"
+  - "Rate limits on OpenRouter during heavy usage"
 
 open_questions:
-  - "TBD"
+  - "Optimal number of draft models for quality vs speed"
+  - "Best persistence strategy for large artifacts"
 
-# Optional: helps later context injection + scoping (keep small)
 tags:
-  - "TBD"                 # e.g., "auth", "db", "external_api", "ui", "cli"
+  - "cli"
+  - "langgraph"
+  - "postgres"
 
 size_caps:
   max_lines: 200

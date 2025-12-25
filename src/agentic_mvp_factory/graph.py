@@ -437,9 +437,15 @@ Rules:
 - Be concrete and actionable
 - Stay within V0 constraints
 
-Output two sections:
-1. SYNTHESIS: The final unified plan
-2. DECISION_PACKET: A compact summary with key decisions, next actions, and risks"""
+Output EXACTLY two markdown sections with these EXACT headings (use ## prefix):
+
+## SYNTHESIS
+The final unified plan
+
+## DECISION_PACKET
+A compact summary with key decisions, next actions, and risks
+
+Do NOT number the sections. Use ## SYNTHESIS and ## DECISION_PACKET exactly."""
     
     # S03: Build user message with optional context
     user_content = f"## Original Packet\n{packet_content}"

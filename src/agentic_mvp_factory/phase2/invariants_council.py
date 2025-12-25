@@ -12,10 +12,12 @@ from datetime import date
 from typing import List, Optional, Tuple
 from uuid import UUID
 
+from agentic_mvp_factory.artifact_deps import validate_allowed_inputs
 from agentic_mvp_factory.model_client import Message, get_openrouter_client, traced_complete
 from agentic_mvp_factory.repo import (
     create_run,
     get_artifacts,
+    get_latest_approved_run_by_task_type,
     get_run,
     update_run_status,
     write_artifact,
@@ -131,7 +133,7 @@ Output the complete markdown and NOTHING else."""
 def _generate_invariants_draft(
     run_id: str,
     model: str,
-    plan_content: str,
+    spec_content: str,
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Generate a single invariants markdown draft.
     
@@ -144,9 +146,9 @@ def _generate_invariants_draft(
         Message(role="system", content=INVARIANTS_SYSTEM_PROMPT),
         Message(
             role="user",
-            content=f"""## Approved Plan
+            content=f"""## Project Spec (spec/spec.yaml)
 
-{plan_content}
+{spec_content}
 
 ---
 
@@ -189,7 +191,7 @@ Output ONLY markdown, starting with # Invariants (V0).""",
 def _generate_invariants_critique(
     run_id: str,
     model: str,
-    plan_content: str,
+    spec_content: str,
     drafts_text: str,
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Generate an invariants critique.
@@ -203,9 +205,9 @@ def _generate_invariants_critique(
         Message(role="system", content=INVARIANTS_CRITIQUE_PROMPT),
         Message(
             role="user",
-            content=f"""## Approved Plan
+            content=f"""## Project Spec (spec/spec.yaml)
 
-{plan_content}
+{spec_content}
 
 ## Invariants Drafts
 
@@ -271,29 +273,37 @@ def run_invariants_council(
     if len(models) < 2:
         raise ValueError(f"At least 2 models required, got {len(models)}")
     
-    # 1. Load and validate the plan
+    # 1. Validate parent plan run exists and is approved
     plan_run = get_run(plan_run_id)
     if not plan_run:
         raise ValueError(f"Plan run not found: {plan_run_id}")
     
-    # Check plan is approved (ready_to_commit or completed)
     if plan_run.status not in ("ready_to_commit", "completed"):
         raise ValueError(
             f"Plan run is not approved (status: {plan_run.status}). "
             f"Approve it first with: council approve {plan_run_id} --approve"
         )
     
-    # Get the plan artifact
-    plan_artifacts = get_artifacts(plan_run_id, kind="plan")
-    if not plan_artifacts:
-        # Fallback to synthesis if plan artifact doesn't exist
-        plan_artifacts = get_artifacts(plan_run_id, kind="synthesis")
-    if not plan_artifacts:
-        raise ValueError(f"No plan artifact found for run: {plan_run_id}")
+    # 2. Load SPEC artifact (invariants depends on spec, not plan directly)
+    spec_run = get_latest_approved_run_by_task_type(plan_run_id, "spec")
+    if not spec_run:
+        raise ValueError(
+            f"No approved spec run found for plan {plan_run_id}. "
+            f"Run spec council first: council run spec --from-plan {plan_run_id} ..."
+        )
     
-    plan_content = plan_artifacts[0].content
+    spec_artifacts = get_artifacts(spec_run.id, kind="output")
+    if not spec_artifacts:
+        raise ValueError(f"No spec output artifact found for spec run: {spec_run.id}")
     
-    # 2. Create new run for invariants generation
+    spec_content = spec_artifacts[0].content
+    
+    # Validate inputs against dependency law (invariants only takes spec)
+    validate_allowed_inputs("invariants", {
+        "spec": f"kind=output from spec run {spec_run.id}",
+    })
+    
+    # 3. Create new run for invariants generation
     inv_run = create_run(
         project_slug=project_slug,
         task_type="invariants",
@@ -301,11 +311,11 @@ def run_invariants_council(
     )
     run_id = str(inv_run.id)
     
-    # Store the plan as a reference artifact
+    # Store the spec as a reference artifact
     write_artifact(
         run_id=inv_run.id,
         kind="packet",
-        content=f"# Source Plan (from run {plan_run_id})\n\n{plan_content}",
+        content=f"# Source Spec (from spec run {spec_run.id}, plan {plan_run_id})\n\n{spec_content}",
         model=None,
     )
     
@@ -317,7 +327,7 @@ def run_invariants_council(
     draft_ids: List[str] = []
     with ThreadPoolExecutor(max_workers=len(models)) as executor:
         futures = {
-            executor.submit(_generate_invariants_draft, run_id, model, plan_content): model
+            executor.submit(_generate_invariants_draft, run_id, model, spec_content): model
             for model in models
         }
         
@@ -344,7 +354,7 @@ def run_invariants_council(
     critique_ids: List[str] = []
     with ThreadPoolExecutor(max_workers=len(models)) as executor:
         futures = {
-            executor.submit(_generate_invariants_critique, run_id, model, plan_content, drafts_text): model
+            executor.submit(_generate_invariants_critique, run_id, model, spec_content, drafts_text): model
             for model in models
         }
         
@@ -370,9 +380,9 @@ def run_invariants_council(
         Message(role="system", content=INVARIANTS_CHAIR_PROMPT),
         Message(
             role="user",
-            content=f"""## Approved Plan
+            content=f"""## Project Spec (spec/spec.yaml)
 
-{plan_content}
+{spec_content}
 
 ## Invariants Drafts
 

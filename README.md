@@ -90,7 +90,7 @@ flowchart TD
   %% ======================
   F -->|approved| G["Phase 2: ARTIFACT COUNCIL<br/>SEQUENTIAL (one artifact at a time)<br/><br/>For EACH artifact:<br/>- 3 model drafts<br/>- critiques<br/>- chair synthesis"]
 
-  G --> H["Artifact build order<br/>(locked sequence)<br/><br/>1 spec/spec.yaml<br/>2 invariants/invariants.md<br/>3 .cursor/rules/00_global.md<br/>4 .cursor/rules/10_invariants.md<br/>5 tracker/factory_tracker.yaml<br/>6 prompts/chair_synthesis_template.md<br/>7 prompts/step_template.md<br/>8 prompts/review_template.md<br/>9 prompts/patch_template.md"]
+  G --> H["Artifact build order<br/>(dependency-enforced sequence)<br/><br/>1. spec/spec.yaml (from plan)<br/>2. invariants/invariants.md (from spec)<br/>3. tracker/factory_tracker.yaml (from spec + invariants)<br/>4. prompts/* (from spec + invariants + tracker)<br/>5. .cursor/rules/* (from spec + invariants)<br/><br/>Each council validates inputs<br/>before LLM calls"]
 
   %% ======================
   %% HITL PER ARTIFACT
@@ -269,14 +269,26 @@ council pack export <run_id> --out artifact_pack.zip
 
 **Purpose:** turn an approved plan into a **canonical artifact pack** you can execute with.
 
-**Artifacts generated in order (recommended):**
+**Artifacts generated in order (dependency-enforced):**
 
-1. **Spec update** (`spec/spec.yaml`)
-2. **Tracker steps** (`tracker/factory_tracker.yaml`)
-3. **Step prompts** (`prompts/step_template.md` and per-step variants if needed)
-4. **Review + patch prompts** (`prompts/review_template.md`, `prompts/patch_template.md`)
-5. **Cursor rules** (`.cursor/rules/00_global.md`, `.cursor/rules/10_invariants.md`)
-6. **Invariants** (`invariants/invariants.md`)
+1. **Spec update** (`spec/spec.yaml`) — reads plan
+2. **Invariants** (`invariants/invariants.md`) — reads spec
+3. **Tracker steps** (`tracker/factory_tracker.yaml`) — reads spec + invariants
+4. **Prompts** (4 templates) — reads spec + invariants + tracker
+5. **Cursor rules** (2 files) — reads spec + invariants
+
+**Dependency Chain (Enforced):**
+```
+Plan → Spec → Invariants → Tracker → Prompts
+                    ↘ Cursor-Rules
+```
+
+**Artifact Dependency Law (V0):**
+- ✅ Each council automatically loads its required inputs from previous approved runs
+- ✅ Dependency validation happens before any LLM calls
+- ✅ Cannot skip the chain (e.g., tracker cannot read plan directly)
+- ✅ Forbidden inputs blocked (context packs, generated outputs as inputs)
+- ✅ Clear error messages if dependencies are missing
 
 **Approval model:**
 
@@ -284,7 +296,7 @@ council pack export <run_id> --out artifact_pack.zip
 * You **approve/edit/reject** each artifact
 * Approved artifacts become canonical **until explicitly regenerated**
 
-This keeps complexity from ballooning and prevents “artifact drift” across chats/runs.
+This keeps complexity from ballooning and prevents "artifact drift" across chats/runs.
 
 ---
 
