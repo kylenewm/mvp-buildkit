@@ -1,193 +1,278 @@
-schema_version: 0.1
-updated_at: 2025-12-20
-project_slug: agentic-mvp-factory
-tracker_name: factory_tracker_v0
+schema_version: "0.1"
+build_id: "B01"
+tracker_id: "T01"
+updated_at: "2025-12-24"
 
-status_legend:
-  - todo
-  - doing
-  - blocked
-  - done
+meta:
+  purpose: "V0 build plan executed via small, proof-driven steps. Commit targets a toy repo until stable."
+  operating_rules:
+    - "Use tmp/toy_repo as the ONLY commit target until S11 passes."
+    - "Patch-only per step; touch only allowed_files."
+    - "Proof commands required; if proof fails, revert and fix before moving on."
+    - "No plan parsing; treat plan artifact as verbatim input."
 
-defaults:
-  proof_required: true
-  commit_required: true
+globals:
+  canonical_paths:
+    - "spec/spec.yaml"
+    - "tracker/factory_tracker.yaml"
+    - "invariants/invariants.md"
+    - ".cursor/rules/00_global.md"
+    - ".cursor/rules/10_invariants.md"
+    - "prompts/step_template.md"
+    - "prompts/review_template.md"
+    - "prompts/patch_template.md"
+    - "prompts/chair_synthesis_template.md"
+    - "docs/ARTIFACT_REGISTRY.md"
+  forbidden_paths:
+    - "tracker/tracker.yaml"
+    - "prompts/hotfix_sync.md"
+    - "docs/build_guide.md"
 
 steps:
-  - id: S01
-    title: Repo scaffold and CLI skeleton
-    status: todo
-    intent: >
-      Create the project structure and a working CLI entrypoint that loads config
-      and can run basic commands without implementing orchestration yet.
+  - id: S00
+    title: "Create toy repo target (ignored)"
+    intent: "Create an internal scratch git repo for safe commit testing."
     deliverables:
-      - "pyproject.toml (or requirements.txt) + basic packaging"
-      - "src/agentic_mvp_factory/cli.py (or equivalent)"
-      - ".env.example with DATABASE_URL and OPENROUTER_API_KEY"
-      - "Makefile/justfile optional: dev commands"
+      - "tmp/toy_repo/ is a git repo with an initial commit"
+      - "tmp/toy_repo is ignored by main repo"
+    allowed_files:
+      - ".gitignore"
+      - "tmp/toy_repo/**"
     acceptance:
-      - "Running `council --help` works"
-      - "Running `council init --repo <path>` creates expected folders"
-      - "Config loads and errors clearly if env vars missing"
+      - "tmp/toy_repo exists and has clean git status"
+      - "main repo does not track tmp/toy_repo"
     proof:
-      - "Paste terminal output of help + init into the run notes or a proof file"
-    notes: ""
+      - "mkdir -p tmp/toy_repo && cd tmp/toy_repo && git init"
+      - "echo '# toy repo' > README.md"
+      - "git add README.md && git commit -m 'init toy repo'"
+      - "cd ../.."
+      - "git status --porcelain"
+      - "test -n \"$(git check-ignore -n tmp/toy_repo || true)\""
+
+  - id: S01
+    title: "Commit safety rails (dirty repo + allowlist + additive-only)"
+    intent: "Prevent overwrites/drift by enforcing strict write rules."
+    deliverables:
+      - "council commit fails if target repo dirty"
+      - "council commit fails if any write path is outside allowlist"
+      - "council commit fails if canonical dest already exists (additive-only for now)"
+      - "manifest written only under versions/<ts>_<run_id>/"
+    allowed_files:
+      - "src/agentic_mvp_factory/cli.py"
+      - "src/agentic_mvp_factory/repo_writer.py"
+      - "src/agentic_mvp_factory/repo.py"
+    acceptance:
+      - "Commit cannot overwrite or write non-canonical paths"
+      - "Error messages list offending paths"
+    proof:
+      - "git -C tmp/toy_repo status --porcelain"
+      - "council commit <run_id> --repo tmp/toy_repo || true"
+      - "echo x >> tmp/toy_repo/README.md"
+      - "council commit <run_id> --repo tmp/toy_repo || true"
 
   - id: S02
-    title: Postgres schema and local dev database
-    status: todo
-    intent: >
-      Define minimal tables (runs, artifacts, approvals) and provide a local
-      Postgres dev story, while remaining compatible with Railway DATABASE_URL.
+    title: "Registry-driven allowlist (single source of truth)"
+    intent: "Make canonical paths explicit and referenced by commit validation."
     deliverables:
-      - "docker-compose.yml for local Postgres"
-      - "SQL migration files OR Alembic migrations (pick one)"
-      - "db init command in CLI: `council db init` (optional but recommended)"
-      - "Repository layer: create_run, write_artifact, list_runs"
+      - "docs/ARTIFACT_REGISTRY.md lists canonical + generated + forbidden"
+      - "commit validation references this registry (or an internal equivalent mapping)"
+    allowed_files:
+      - "docs/ARTIFACT_REGISTRY.md"
+      - "src/agentic_mvp_factory/repo_writer.py"
     acceptance:
-      - "Local Postgres can be started with one command"
-      - "Schema can be created from scratch reliably"
-      - "CLI can create a run row and store a packet artifact"
+      - "Registry is authoritative; drift triggers failure"
     proof:
-      - "Terminal output showing DB up + schema created + run inserted"
-    notes: ""
+      - "cat docs/ARTIFACT_REGISTRY.md | sed -n '1,120p'"
+      - "council commit <run_id> --repo tmp/toy_repo || true"
 
   - id: S03
-    title: OpenRouter ModelClient (single call)
-    status: todo
-    intent: >
-      Implement ModelClient + OpenRouter client that can execute one prompt and store
-      the response as an artifact, including usage metadata when available.
+    title: "Phase 0 integration: add --context to council run plan"
+    intent: "Inject bounded context into plan drafts/critiques/chair."
     deliverables:
-      - "ModelClient interface"
-      - "OpenRouterClient with configurable model name"
-      - "Artifacts store: kind=draft (or test kind) with model field"
-      - "Basic timeout support"
+      - "council run plan supports --context <path>"
+      - "context pack content included in prompts for draft + critique + chair"
+    allowed_files:
+      - "src/agentic_mvp_factory/cli.py"
+      - "src/agentic_mvp_factory/graph.py"
     acceptance:
-      - "CLI can run a test call: `council model test --model <id>`"
-      - "Response content stored in artifacts table"
-      - "usage_json stored when returned"
+      - "Providing --context changes stored prompt/packet artifacts to include context content"
     proof:
-      - "DB row(s) visible for the artifact; terminal output confirming success"
-    notes: ""
+      - "council run plan --project <slug> --packet council/packets/plan_packet.md --context phase_0/context_pack_lite.md --models <m1>,<m2> --chair <m1>"
+      - "council show <new_plan_run_id> --section packet"
 
   - id: S04
-    title: LangGraph wiring (linear, no interrupt yet)
-    status: todo
-    intent: >
-      Create the LangGraph graph with nodes that run sequentially first:
-      load_packet -> draft -> critique -> chair_synthesis, storing artifacts at each step.
+    title: "Spec Council: stabilize output artifact + YAML validation"
+    intent: "Make spec council outputs reliable and commit-compatible."
     deliverables:
-      - "graph.py defining state + nodes"
-      - "Runner entrypoint invoked by CLI: `council run plan ...`"
-      - "Artifacts written for packet, drafts, critiques, synthesis, decision_packet"
+      - "final spec stored as kind=output (not custom kinds)"
+      - "chair output YAML validated (safe_load + required keys)"
+      - "no fenced-code formatting passed into chair that encourages fences"
+    allowed_files:
+      - "src/agentic_mvp_factory/phase2/spec_council.py"
     acceptance:
-      - "A run produces all expected artifacts for 2+ models"
-      - "Run status transitions through drafting/critique/synthesis"
+      - "Spec council run ends waiting_for_approval and output is valid YAML"
     proof:
-      - "CLI `council show <run_id> --section all` displays stored artifacts"
-    notes: ""
+      - "council run spec --from-plan <approved_plan_run_id> --project <slug> --models <m1>,<m2> --chair <m1>"
+      - "council show <spec_run_id> --section outputs"
 
   - id: S05
-    title: Parallel drafts + parallel critiques
-    status: todo
-    intent: >
-      Update graph to run drafts in parallel and critiques in parallel
-      (each model critiques all drafts).
+    title: "Commit supports spec runs (spec/spec.yaml only)"
+    intent: "Commit writes only spec + snapshot + manifest for spec council."
     deliverables:
-      - "Parallel execution for draft phase"
-      - "Parallel execution for critique phase"
-      - "Critique topology: one critique per model referencing all drafts"
+      - "spec/spec.yaml written into tmp/toy_repo"
+      - "versions/<ts>_<run_id>/COMMIT_MANIFEST.md created"
+    allowed_files:
+      - "src/agentic_mvp_factory/cli.py"
+      - "src/agentic_mvp_factory/repo_writer.py"
+      - "src/agentic_mvp_factory/repo.py"
     acceptance:
-      - "3-model run produces 3 drafts + 3 critiques"
-      - "Artifacts are consistently associated with the correct model"
+      - "Toy repo contains spec/spec.yaml and versions snapshot; nothing else added"
     proof:
-      - "Show artifact counts and sample critique output"
-    notes: ""
+      - "council approve <spec_run_id> --approve"
+      - "council commit <spec_run_id> --repo tmp/toy_repo"
+      - "tree -L 4 tmp/toy_repo"
+      - "cat tmp/toy_repo/versions/*/COMMIT_MANIFEST.md"
 
   - id: S06
-    title: HITL approval interrupt + resume across CLI sessions
-    status: todo
-    intent: >
-      Add the interrupt after chair_synthesis and implement CLI approve/edit/reject
-      that resumes the workflow using persisted state.
+    title: "Phase 2: Tracker Council (tracker/factory_tracker.yaml)"
+    intent: "Generate tracker YAML from approved plan (verbatim) with HITL."
     deliverables:
-      - "interrupt node returning payload"
-      - "CLI: `council approve <run_id>` with approve/edit/reject"
-      - "edit+approve opens $EDITOR and stores edited text"
-      - "Reject triggers NEW run_id with parent_run_id link (optional but preferred)"
+      - "council run tracker --from-plan <plan_run_id> works"
+      - "final tracker stored as kind=output"
+    allowed_files:
+      - "src/agentic_mvp_factory/cli.py"
+      - "src/agentic_mvp_factory/phase2/tracker_council.py"
+      - "src/agentic_mvp_factory/repo.py"
     acceptance:
-      - "Run pauses at waiting_for_approval"
-      - "You can close terminal and later approve and resume"
-      - "approve leads to commit stage (even if commit is stubbed initially)"
-      - "reject creates a new run and restarts with appended feedback"
+      - "Tracker council produces valid YAML with steps and proofs"
     proof:
-      - "Terminal transcripts demonstrating pause + resume"
-    notes: ""
+      - "council run tracker --from-plan <approved_plan_run_id> --project <slug> --models <m1>,<m2> --chair <m1>"
+      - "council show <tracker_run_id> --section outputs"
 
   - id: S07
-    title: Precommit minimal validation
-    status: todo
-    intent: >
-      Before writing files, validate that generated outputs parse and contain required keys.
-      Keep validation minimal for V0.
+    title: "Commit supports tracker runs"
+    intent: "Commit writes tracker/factory_tracker.yaml only + snapshot + manifest."
     deliverables:
-      - "Validator module for YAML/JSON parse + required keys"
-      - "Validation errors stored as error artifacts"
+      - "tracker/factory_tracker.yaml written into tmp/toy_repo"
+      - "forbidden tracker/tracker.yaml never written"
+    allowed_files:
+      - "src/agentic_mvp_factory/repo_writer.py"
+      - "src/agentic_mvp_factory/cli.py"
     acceptance:
-      - "Invalid output prevents commit and clearly reports why"
-      - "Valid output proceeds to commit"
+      - "Toy repo has tracker/factory_tracker.yaml"
+      - "Toy repo does NOT have tracker/tracker.yaml"
     proof:
-      - "One negative test case + one positive case"
-    notes: ""
+      - "council approve <tracker_run_id> --approve"
+      - "council commit <tracker_run_id> --repo tmp/toy_repo"
+      - "ls -la tmp/toy_repo/tracker"
+      - "! test -f tmp/toy_repo/tracker/tracker.yaml"
 
   - id: S08
-    title: Commit outputs to repo (stable paths + snapshot versions)
-    status: todo
-    intent: >
-      Implement repo writer that writes the Phase-2 artifact pack stubs into target repo,
-      and also snapshots written files into versions/<timestamp>_<run_id>/.
+    title: "Phase 2: Prompts Council (4 templates)"
+    intent: "Generate prompt templates as canonical files."
     deliverables:
-      - "Repo writer module"
-      - "Outputs generated on commit (spec, tracker, invariants, cursor rules, prompts, build guide)"
-      - "Commit manifest artifact stored in Postgres"
+      - "prompts/step_template.md"
+      - "prompts/review_template.md"
+      - "prompts/patch_template.md"
+      - "prompts/chair_synthesis_template.md"
+    allowed_files:
+      - "src/agentic_mvp_factory/cli.py"
+      - "src/agentic_mvp_factory/phase2/prompts_council.py"
+      - "src/agentic_mvp_factory/repo_writer.py"
     acceptance:
-      - "Running commit writes stable paths"
-      - "Snapshot folder created with copies of written files"
-      - "Commit manifest lists all files written"
+      - "Prompts council outputs include all 4 files (as outputs/manifest)"
     proof:
-      - "Directory tree output + manifest content"
-    notes: ""
+      - "council run prompts --from-plan <approved_plan_run_id> --project <slug> --models <m1>,<m2> --chair <m1>"
+      - "council show <prompts_run_id> --section outputs"
 
   - id: S09
-    title: CLI ergonomics (status, show, paging, open)
-    status: todo
-    intent: >
-      Make the CLI usable daily: summaries, sections, and editor-friendly output.
+    title: "Commit supports prompts runs"
+    intent: "Commit writes only the 4 prompt templates + snapshot + manifest."
     deliverables:
-      - "`council status` supports --project filter"
-      - "`council show` supports --section and --open"
-      - "Reasonable default summary output"
+      - "prompts/*.md written into tmp/toy_repo"
+    allowed_files:
+      - "src/agentic_mvp_factory/repo_writer.py"
+      - "src/agentic_mvp_factory/cli.py"
     acceptance:
-      - "You can quickly find runs waiting for approval"
-      - "You can view only synthesis or only drafts without noise"
+      - "Toy repo has exactly the 4 prompt templates (no extras)"
     proof:
-      - "Terminal output screenshots/transcripts"
-    notes: ""
+      - "council approve <prompts_run_id> --approve"
+      - "council commit <prompts_run_id> --repo tmp/toy_repo"
+      - "ls -la tmp/toy_repo/prompts"
+      - "tree -L 3 tmp/toy_repo/prompts"
 
   - id: S10
-    title: Dogfood run on the factory itself
-    status: todo
-    intent: >
-      Use the runner to generate an implementation plan and commit a starter artifact pack
-      for the next iteration of the factory (or a toy project).
+    title: "Phase 2: Cursor Rules Council (2 files)"
+    intent: "Generate .cursor/rules files that reference invariants and enforce patch discipline."
     deliverables:
-      - "At least one complete run with 3 models"
-      - "Approved synthesis"
-      - "Committed artifact pack into a repo path"
+      - ".cursor/rules/00_global.md"
+      - ".cursor/rules/10_invariants.md"
+    allowed_files:
+      - "src/agentic_mvp_factory/cli.py"
+      - "src/agentic_mvp_factory/phase2/cursor_rules_council.py"
+      - "src/agentic_mvp_factory/repo_writer.py"
     acceptance:
-      - "End-to-end loop works without manual DB edits"
-      - "Artifacts are useful enough to drive real Cursor work"
+      - "Rules do not duplicate invariants definitions; they reference invariants/invariants.md"
     proof:
-      - "Run_id + outputs folder created"
-    notes: ""
+      - "council run cursor-rules --from-plan <approved_plan_run_id> --project <slug> --models <m1>,<m2> --chair <m1>"
+      - "council show <rules_run_id> --section outputs"
+
+  - id: S11
+    title: "Phase 2: Invariants Council (invariants/invariants.md)"
+    intent: "Generate canonical invariants once; rules reference them."
+    deliverables:
+      - "invariants/invariants.md"
+    allowed_files:
+      - "src/agentic_mvp_factory/cli.py"
+      - "src/agentic_mvp_factory/phase2/invariants_council.py"
+      - "src/agentic_mvp_factory/repo_writer.py"
+    acceptance:
+      - "Invariants exist; include commit safety invariant (additive-only + dirty repo fail)"
+    proof:
+      - "council run invariants --from-plan <approved_plan_run_id> --project <slug> --models <m1>,<m2> --chair <m1>"
+      - "council show <invariants_run_id> --section outputs"
+
+  - id: S12
+    title: "Commit supports full Phase 2 pack (multi-artifact commit)"
+    intent: "One command writes the full canonical pack into tmp/toy_repo from the latest approved artifacts."
+    deliverables:
+      - "All canonical paths exist in tmp/toy_repo"
+      - "Single snapshot folder contains manifest listing all files written"
+    allowed_files:
+      - "src/agentic_mvp_factory/repo_writer.py"
+      - "src/agentic_mvp_factory/cli.py"
+      - "src/agentic_mvp_factory/repo.py"
+    acceptance:
+      - "Toy repo has spec, tracker, invariants, rules, prompts, registry"
+      - "Forbidden paths absent"
+    proof:
+      - "council commit pack --project <slug> --from-plan <approved_plan_run_id> --repo tmp/toy_repo"
+      - "tree -L 5 tmp/toy_repo"
+      - "! test -f tmp/toy_repo/tracker/tracker.yaml"
+      - "! test -f tmp/toy_repo/prompts/hotfix_sync.md"
+
+  - id: S13
+    title: "Drift checker passes (canonical refs only)"
+    intent: "Catch drift/deprecated references early and keep repo clean."
+    deliverables:
+      - "scripts/check_artifacts.py exits 0"
+    allowed_files:
+      - "scripts/check_artifacts.py"
+      - "docs/ARTIFACT_REGISTRY.md"
+    acceptance:
+      - "No deprecated paths referenced by canonical files"
+    proof:
+      - "python scripts/check_artifacts.py"
+
+  - id: S14
+    title: "Toy end-to-end dogfood script"
+    intent: "One repeatable command runs the whole chain into tmp/toy_repo."
+    deliverables:
+      - "scripts/toy_dogfood.sh"
+    allowed_files:
+      - "scripts/toy_dogfood.sh"
+    acceptance:
+      - "Script produces full pack in tmp/toy_repo"
+    proof:
+      - "bash scripts/toy_dogfood.sh"
+      - "tree -L 5 tmp/toy_repo"

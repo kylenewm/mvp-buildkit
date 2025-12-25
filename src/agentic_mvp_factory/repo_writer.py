@@ -553,3 +553,151 @@ def commit_outputs(
         # Always release lock
         _release_lock(repo_path)
 
+
+def commit_spec_outputs(
+    run_id: UUID,
+    repo_path: Path,
+) -> CommitManifest:
+    """
+    Commit spec council outputs to target repo (spec-only, additive mode).
+    
+    This is a specialized commit for Phase 2 spec generation.
+    Only writes: spec/spec.yaml + versions/<timestamp>_<run_id>/**
+    
+    Args:
+        run_id: The approved spec run to commit
+        repo_path: Target repository path
+        
+    Returns:
+        CommitManifest with details of written files
+        
+    Raises:
+        ValueError: If run is not ready to commit or not a spec run
+        RuntimeError: If lock cannot be acquired, repo is dirty, or not a git repo
+    """
+    from agentic_mvp_factory.repo import get_run, get_artifacts, write_artifact, update_run_status
+    
+    # Validate run exists and is ready
+    run = get_run(run_id)
+    if not run:
+        raise ValueError(f"Run not found: {run_id}")
+    
+    if run.status != "ready_to_commit":
+        raise ValueError(f"Run is not ready to commit (status: {run.status})")
+    
+    if run.task_type != "spec":
+        raise ValueError(f"Run is not a spec run (task_type: {run.task_type})")
+    
+    # Get output artifact (validated spec content) or fallback to synthesis
+    spec_artifacts = get_artifacts(run_id, kind="output")
+    if not spec_artifacts:
+        # Fallback to synthesis_edited or synthesis
+        edited_artifacts = get_artifacts(run_id, kind="synthesis_edited")
+        if edited_artifacts:
+            spec_content = edited_artifacts[0].content
+        else:
+            synthesis_artifacts = get_artifacts(run_id, kind="synthesis")
+            if synthesis_artifacts:
+                spec_content = synthesis_artifacts[0].content
+            else:
+                raise ValueError("No spec candidate or synthesis artifact found")
+    else:
+        spec_content = spec_artifacts[0].content
+    
+    # Ensure repo path exists
+    repo_path = Path(repo_path).resolve()
+    repo_path.mkdir(parents=True, exist_ok=True)
+    
+    # === FAIL-SAFE CHECKS ===
+    
+    # 1. Verify target is a git repo
+    if not _is_git_repo(repo_path):
+        raise RuntimeError(
+            f"COMMIT BLOCKED: Target path is not a git repository.\n"
+            f"  Path: {repo_path}\n"
+            f"  Initialize with: git init"
+        )
+    
+    # 2. Check for uncommitted changes (dirty repo)
+    has_changes, status_output = _has_uncommitted_changes(repo_path)
+    if has_changes:
+        raise RuntimeError(
+            f"COMMIT BLOCKED: Target repo has uncommitted changes.\n"
+            f"  Path: {repo_path}\n"
+            f"  Status:\n{status_output}\n"
+            f"  Commit or stash changes before running council commit."
+        )
+    
+    # 3. Spec-only allowlist
+    spec_allowed_path = "spec/spec.yaml"
+    
+    # 4. Additive-only: fail if spec/spec.yaml already exists
+    existing = _check_existing_files(repo_path, [spec_allowed_path])
+    if existing:
+        raise ValueError(
+            f"COMMIT BLOCKED: spec/spec.yaml already exists (additive-only mode).\n"
+            f"  Path: {repo_path / spec_allowed_path}\n"
+            f"  Remove this file or use a fresh repo to proceed."
+        )
+    
+    # === END FAIL-SAFE CHECKS ===
+    
+    # Acquire lock
+    if not _acquire_lock(repo_path):
+        raise RuntimeError(f"Cannot acquire lock - another commit may be in progress. Check {repo_path / LOCK_FILE}")
+    
+    try:
+        # Update status to committing
+        update_run_status(run_id, "committing")
+        
+        # Prepare manifest
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        manifest = CommitManifest(
+            run_id=str(run_id),
+            timestamp=timestamp,
+        )
+        
+        # Create snapshot directory
+        snapshot_dir = repo_path / "versions" / f"{timestamp}_{run_id}"
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        manifest.snapshot_path = str(snapshot_dir.relative_to(repo_path))
+        
+        # Write spec/spec.yaml
+        spec_file = repo_path / spec_allowed_path
+        spec_file.parent.mkdir(parents=True, exist_ok=True)
+        spec_file.write_text(spec_content)
+        
+        # Write to snapshot
+        snapshot_spec = snapshot_dir / spec_allowed_path
+        snapshot_spec.parent.mkdir(parents=True, exist_ok=True)
+        snapshot_spec.write_text(spec_content)
+        
+        # Record in manifest
+        manifest.stable_paths_written.append(spec_allowed_path)
+        manifest.file_hashes[spec_allowed_path] = _compute_sha256(spec_content)
+        
+        # Write manifest to snapshot directory only (not repo root)
+        manifest_path = snapshot_dir / "COMMIT_MANIFEST.md"
+        manifest_path.write_text(manifest.to_markdown())
+        
+        # Also write JSON manifest to snapshot
+        manifest_json_path = snapshot_dir / "manifest.json"
+        manifest_json_path.write_text(manifest.to_json())
+        
+        # Store manifest as artifact
+        write_artifact(
+            run_id=run_id,
+            kind="commit_log",
+            content=manifest.to_json(),
+            model=None,
+        )
+        
+        # Update status to completed
+        update_run_status(run_id, "completed")
+        
+        return manifest
+        
+    finally:
+        # Always release lock
+        _release_lock(repo_path)
+

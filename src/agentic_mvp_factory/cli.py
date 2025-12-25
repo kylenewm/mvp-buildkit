@@ -277,6 +277,122 @@ def run_plan(project: str, packet: str, models: str, chair: str, phase_1_check: 
         raise SystemExit(1)
 
 
+@run.command("spec")
+@click.option(
+    "--from-plan",
+    "plan_run_id",
+    required=True,
+    help="Run ID of the approved plan to generate spec from",
+)
+@click.option(
+    "--project",
+    required=True,
+    help="Project slug for namespace isolation",
+)
+@click.option(
+    "--models",
+    required=True,
+    help="Comma-separated list of model IDs for drafts/critiques",
+)
+@click.option(
+    "--chair",
+    required=True,
+    help="Model ID for chair synthesis",
+)
+def run_spec(plan_run_id: str, project: str, models: str, chair: str):
+    """Run a spec generation council (Phase 2).
+    
+    Generates spec/spec.yaml from an approved plan.
+    """
+    import os
+    from uuid import UUID as UUIDType
+    
+    # Check required env vars
+    if not os.environ.get("DATABASE_URL"):
+        click.echo("Error: DATABASE_URL environment variable is required.", err=True)
+        raise SystemExit(1)
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        click.echo("Error: OPENROUTER_API_KEY environment variable is required.", err=True)
+        raise SystemExit(1)
+    
+    # Validate plan run ID
+    try:
+        plan_uuid = UUIDType(plan_run_id)
+    except ValueError:
+        click.echo(f"Error: Invalid plan run ID format: {plan_run_id}", err=True)
+        raise SystemExit(1)
+    
+    # Parse models
+    model_list = [m.strip() for m in models.split(",") if m.strip()]
+    if len(model_list) < 2:
+        click.echo("Error: At least 2 models are required.", err=True)
+        raise SystemExit(1)
+    
+    click.echo(f"Running spec council (Phase 2)")
+    click.echo(f"  From plan: {plan_run_id}")
+    click.echo(f"  Project: {project}")
+    click.echo(f"  Models: {model_list}")
+    click.echo(f"  Chair: {chair}")
+    click.echo()
+    
+    try:
+        from agentic_mvp_factory.phase2.spec_council import run_spec_council
+        
+        click.echo("Starting spec council...")
+        click.echo(f"  [1/4] Loading approved plan...")
+        click.echo(f"  [2/4] Generating {len(model_list)} spec drafts...")
+        click.echo(f"  [3/4] Generating {len(model_list)} critiques...")
+        click.echo(f"  [4/4] Chair synthesis...")
+        
+        run_id, failed_models = run_spec_council(
+            plan_run_id=plan_uuid,
+            project_slug=project,
+            models=model_list,
+            chair_model=chair,
+        )
+        
+        click.echo()
+        click.echo(f"Spec council complete!")
+        click.echo(f"  Run ID: {run_id}")
+        
+        if failed_models:
+            click.echo(f"  Failed models: {failed_models}", err=True)
+        
+        # Show artifact counts
+        from agentic_mvp_factory.repo import get_artifacts
+        run_uuid = UUIDType(run_id)
+        drafts = get_artifacts(run_uuid, kind="draft")
+        critiques = get_artifacts(run_uuid, kind="critique")
+        errors = get_artifacts(run_uuid, kind="error")
+        
+        click.echo()
+        click.echo(f"Artifacts created:")
+        click.echo(f"  Drafts: {len(drafts)}")
+        click.echo(f"  Critiques: {len(critiques)}")
+        if errors:
+            click.echo(f"  Errors: {len(errors)}")
+        
+        click.echo()
+        click.echo(f"Status: waiting_for_approval")
+        click.echo()
+        click.echo(f"To view spec candidate:")
+        click.echo(f"  council show {run_id} --section synthesis")
+        click.echo()
+        click.echo(f"To approve:")
+        click.echo(f"  council approve {run_id} --approve")
+        click.echo(f"  council approve {run_id} --edit")
+        click.echo()
+        click.echo(f"To commit (spec-only):")
+        click.echo(f"  council commit {run_id} --repo <path>")
+        
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+
+
 # Model commands (S03)
 @cli.group()
 def model():
@@ -823,7 +939,8 @@ def commit(run_id: str, repo: str):
     """Commit approved run outputs to a target repository."""
     from pathlib import Path
     from uuid import UUID as UUIDType
-    from agentic_mvp_factory.repo_writer import commit_outputs
+    from agentic_mvp_factory.repo import get_run
+    from agentic_mvp_factory.repo_writer import commit_outputs, commit_spec_outputs
     
     try:
         run_uuid = UUIDType(run_id)
@@ -831,13 +948,24 @@ def commit(run_id: str, repo: str):
         click.echo(f"Error: Invalid run ID format: {run_id}", err=True)
         raise SystemExit(1)
     
+    # Get run to determine task_type
+    run = get_run(run_uuid)
+    if not run:
+        click.echo(f"Error: Run not found: {run_id}", err=True)
+        raise SystemExit(1)
+    
     repo_path = Path(repo).resolve()
     
     click.echo(f"Committing run {run_id} to {repo_path}")
+    click.echo(f"  Task type: {run.task_type}")
     click.echo()
     
     try:
-        manifest = commit_outputs(run_uuid, repo_path)
+        # Use spec-specific commit for spec runs
+        if run.task_type == "spec":
+            manifest = commit_spec_outputs(run_uuid, repo_path)
+        else:
+            manifest = commit_outputs(run_uuid, repo_path)
         
         click.echo(f"Commit successful!")
         click.echo()
@@ -846,7 +974,7 @@ def commit(run_id: str, repo: str):
             click.echo(f"  - {path}")
         click.echo()
         click.echo(f"Snapshot: {manifest.snapshot_path}")
-        click.echo(f"Manifest: COMMIT_MANIFEST.md")
+        click.echo(f"Manifest: COMMIT_MANIFEST.md (in snapshot dir)")
         click.echo()
         click.echo(f"View with: tree {repo_path} -L 3")
         
