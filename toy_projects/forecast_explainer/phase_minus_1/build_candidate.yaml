@@ -1,0 +1,31 @@
+schema_version: "0.1"
+build_id: "B02"
+state_version: 1
+title: "Toy Project — Forecast Explainer CLI"
+problem: "Need a deterministic CLI toy to validate the factory pipeline end-to-end."
+target_user: "Developer testing the factory"
+wow_slice: "Plan → approve → commit writes canonical pack into toy repo"
+done_enough:
+  - "CLI reads forecast.json and prints a human summary"
+  - "Deterministic output (no web/API calls)"
+  - "Factory can run planning council against this project"
+  - "Approved plan can be committed to a toy repo"
+constraints:
+  - "CLI-only, no GUI"
+  - "No external APIs or web calls"
+  - "No secrets in repo"
+  - "Must run offline with local data file only"
+  - "Python 3.9+ compatible"
+non_goals:
+  - "Production weather service"
+  - "Real-time data fetching"
+  - "Touch any factory canonical artifacts"
+  - "Database or persistence layer"
+risks:
+  - "Toy is too trivial to exercise full factory flow"
+  - "Missing edge cases in forecast data"
+open_questions:
+  - "Should output include ASCII art?"
+size_caps:
+  max_lines: 200
+  max_words: 1500

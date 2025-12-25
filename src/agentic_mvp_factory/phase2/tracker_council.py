@@ -1,7 +1,7 @@
-"""Phase 2 Spec Council - generates spec/spec.yaml from an approved plan.
+"""Phase 2 Tracker Council - generates tracker/factory_tracker.yaml from an approved plan.
 
 Usage:
-    council run spec --from-plan <plan_run_id> --project <slug> --models <list> --chair <model>
+    council run tracker --from-plan <plan_run_id> --project <slug> --models <list> --chair <model>
 """
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -25,66 +25,81 @@ from agentic_mvp_factory.repo import (
 # PROMPTS
 # =============================================================================
 
-SPEC_SYSTEM_PROMPT = """You are a council member generating a project specification.
+TRACKER_SYSTEM_PROMPT = """You are a council member generating a project tracker (step-by-step implementation plan).
 
-Your job is to produce a valid YAML document for spec/spec.yaml based on the approved plan.
+Your job is to produce a valid YAML document for tracker/factory_tracker.yaml based on the approved plan.
 
 CRITICAL FORMAT REQUIREMENTS:
 - Output ONLY valid YAML (NO markdown fences, NO ``` anywhere, NO explanations)
-- The YAML must start with these EXACT top-level keys in this order:
+- The YAML must start with these EXACT top-level keys:
   schema_version: "0.1"
+  build_id: <from plan if available, else use project slug>
   updated_at: <today's date as YYYY-MM-DD>
-  project:
-    name: <project name>
-    slug: <project slug>
-    ...
+  steps: [list of implementation steps]
 
-Required top-level keys:
-- schema_version (must be "0.1")
-- updated_at (must be at TOP LEVEL, not nested)
-- project (contains name, slug, north_star, done_enough_v0)
-- constraints
-- non_goals_v0
+Each step in the steps list MUST have:
+- id: S01, S02, etc (incremental)
+- title: short name of the step
+- intent: what this step accomplishes
+- deliverables: list of concrete outputs
+- acceptance: list of criteria for step completion
+- proof: list of shell commands to verify
+- allowed_files: list of files this step may touch
 
-Optional keys: v0_mode, core_entities, cli_v0, storage_v0, open_questions, milestones_v0
+Guidelines:
+- Keep steps focused and atomic (1 sitting each)
+- Order steps by dependency
+- Each step should take 30-60 minutes max
+- Proof commands must be runnable and deterministic
+- 6-10 steps is typical for a V0 build
 
-Stay within V0 scope. Keep it concise and actionable.
+Output ONLY valid YAML, nothing else.
 """
 
-SPEC_CRITIQUE_PROMPT = """You are reviewing a spec/spec.yaml draft.
+TRACKER_CRITIQUE_PROMPT = """You are reviewing a tracker/factory_tracker.yaml draft.
 
 Check for:
-1. Valid YAML syntax
-2. All required sections present
-3. Alignment with the approved plan
-4. V0 scope constraints respected
-5. Clarity and actionability
+1. Valid YAML syntax (no markdown fences, proper indentation)
+2. All required fields present for each step (id, title, intent, deliverables, acceptance, proof, allowed_files)
+3. Steps are properly ordered by dependency
+4. Steps are atomic and achievable in one sitting
+5. Proof commands are concrete and runnable
+6. No scope creep - stays within V0 bounds
+7. Alignment with the approved plan
 
-Provide specific, actionable feedback. Focus on correctness, not style."""
+Provide specific, actionable feedback. Focus on correctness and completeness, not style.
+Be concise - 3-5 key points maximum."""
 
-SPEC_CHAIR_PROMPT = """You are the Chair synthesizing spec drafts and critiques.
+TRACKER_CHAIR_PROMPT = """You are the Chair synthesizing tracker drafts and critiques.
 
-Your task: produce the FINAL spec/spec.yaml content.
+Your task: produce the FINAL tracker/factory_tracker.yaml content.
 
 CRITICAL FORMAT REQUIREMENTS:
 - Output ONLY raw YAML (NO markdown fences, NO ``` anywhere, NO explanations)
 - Start directly with YAML content, not with ```yaml
 - The output must be valid YAML that can be written directly to a file
 
-REQUIRED STRUCTURE (use these exact top-level keys):
+REQUIRED STRUCTURE:
 schema_version: "0.1"
+build_id: <from plan or project>
 updated_at: <YYYY-MM-DD>
-project:
-  name: ...
-  slug: ...
-  north_star: ...
-  done_enough_v0: ...
-constraints:
-  ...
-non_goals_v0:
-  - ...
+steps:
+  - id: S01
+    title: ...
+    intent: ...
+    deliverables:
+      - ...
+    acceptance:
+      - ...
+    proof:
+      - ...
+    allowed_files:
+      - ...
+  - id: S02
+    ...
 
 Incorporate the best elements from all drafts. Address critique feedback.
+Ensure steps are properly ordered, atomic, and verifiable.
 Output the complete YAML content and NOTHING else - no fences, no explanation."""
 
 
@@ -92,12 +107,12 @@ Output the complete YAML content and NOTHING else - no fences, no explanation.""
 # COUNCIL FUNCTIONS
 # =============================================================================
 
-def _generate_spec_draft(
+def _generate_tracker_draft(
     run_id: str,
     model: str,
     plan_content: str,
 ) -> Tuple[str, Optional[str], Optional[str]]:
-    """Generate a single spec draft.
+    """Generate a single tracker draft.
     
     Returns:
         (model, artifact_id or None, error or None)
@@ -107,7 +122,7 @@ def _generate_spec_draft(
     today = date.today().isoformat()
     
     messages = [
-        Message(role="system", content=SPEC_SYSTEM_PROMPT),
+        Message(role="system", content=TRACKER_SYSTEM_PROMPT),
         Message(
             role="user",
             content=f"""## Approved Plan
@@ -116,7 +131,7 @@ def _generate_spec_draft(
 
 ---
 
-Generate the complete spec/spec.yaml content.
+Generate the complete tracker/factory_tracker.yaml content.
 Use updated_at: {today}
 Output ONLY valid YAML.""",
         ),
@@ -128,7 +143,7 @@ Output ONLY valid YAML.""",
             messages=messages,
             model=model,
             timeout=120.0,
-            phase="spec_draft",
+            phase="tracker_draft",
             run_id=run_id,
         )
         
@@ -147,19 +162,19 @@ Output ONLY valid YAML.""",
         write_artifact(
             run_id=UUID(run_id),
             kind="error",
-            content=f"Spec draft failed for {model}: {str(e)}",
+            content=f"Tracker draft failed for {model}: {str(e)}",
             model=model,
         )
         return (model, None, str(e))
 
 
-def _generate_spec_critique(
+def _generate_tracker_critique(
     run_id: str,
     model: str,
     plan_content: str,
     drafts_text: str,
 ) -> Tuple[str, Optional[str], Optional[str]]:
-    """Generate a spec critique.
+    """Generate a tracker critique.
     
     Returns:
         (model, artifact_id or None, error or None)
@@ -167,20 +182,20 @@ def _generate_spec_critique(
     client = get_openrouter_client()
     
     messages = [
-        Message(role="system", content=SPEC_CRITIQUE_PROMPT),
+        Message(role="system", content=TRACKER_CRITIQUE_PROMPT),
         Message(
             role="user",
             content=f"""## Approved Plan
 
 {plan_content}
 
-## Spec Drafts
+## Tracker Drafts
 
 {drafts_text}
 
 ---
 
-Provide your critique of these spec drafts.""",
+Provide your critique of these tracker drafts.""",
         ),
     ]
     
@@ -190,7 +205,7 @@ Provide your critique of these spec drafts.""",
             messages=messages,
             model=model,
             timeout=120.0,
-            phase="spec_critique",
+            phase="tracker_critique",
             run_id=run_id,
         )
         
@@ -208,19 +223,19 @@ Provide your critique of these spec drafts.""",
         write_artifact(
             run_id=UUID(run_id),
             kind="error",
-            content=f"Spec critique failed for {model}: {str(e)}",
+            content=f"Tracker critique failed for {model}: {str(e)}",
             model=model,
         )
         return (model, None, str(e))
 
 
-def run_spec_council(
+def run_tracker_council(
     plan_run_id: UUID,
     project_slug: str,
     models: List[str],
     chair_model: str,
 ) -> Tuple[str, List[str]]:
-    """Run a spec generation council.
+    """Run a tracker generation council.
     
     Args:
         plan_run_id: The approved plan run ID
@@ -260,17 +275,17 @@ def run_spec_council(
     
     plan_content = plan_artifacts[0].content
     
-    # 2. Create new run for spec generation
-    spec_run = create_run(
+    # 2. Create new run for tracker generation
+    tracker_run = create_run(
         project_slug=project_slug,
-        task_type="spec",
+        task_type="tracker",
         parent_run_id=plan_run_id,
     )
-    run_id = str(spec_run.id)
+    run_id = str(tracker_run.id)
     
     # Store the plan as a reference artifact
     write_artifact(
-        run_id=spec_run.id,
+        run_id=tracker_run.id,
         kind="packet",
         content=f"# Source Plan (from run {plan_run_id})\n\n{plan_content}",
         model=None,
@@ -279,12 +294,12 @@ def run_spec_council(
     failed_models: List[str] = []
     
     # 3. Generate drafts in parallel
-    update_run_status(spec_run.id, "drafting")
+    update_run_status(tracker_run.id, "drafting")
     
     draft_ids: List[str] = []
     with ThreadPoolExecutor(max_workers=len(models)) as executor:
         futures = {
-            executor.submit(_generate_spec_draft, run_id, model, plan_content): model
+            executor.submit(_generate_tracker_draft, run_id, model, plan_content): model
             for model in models
         }
         
@@ -296,14 +311,14 @@ def run_spec_council(
                 failed_models.append(model)
     
     if len(draft_ids) < 2:
-        update_run_status(spec_run.id, "failed")
+        update_run_status(tracker_run.id, "failed")
         raise ValueError(f"Only {len(draft_ids)} draft(s) succeeded. Need at least 2.")
     
     # 4. Generate critiques in parallel
-    update_run_status(spec_run.id, "critiquing")
+    update_run_status(tracker_run.id, "critiquing")
     
     # Format drafts for critique (no code fences to reduce chair mirroring fences)
-    drafts = get_artifacts(spec_run.id, kind="draft")
+    drafts = get_artifacts(tracker_run.id, kind="draft")
     drafts_text = ""
     for i, draft in enumerate(drafts, 1):
         drafts_text += f"\n=== DRAFT {i} (model={draft.model}) ===\n{draft.content}\n=== END DRAFT {i} ===\n"
@@ -311,7 +326,7 @@ def run_spec_council(
     critique_ids: List[str] = []
     with ThreadPoolExecutor(max_workers=len(models)) as executor:
         futures = {
-            executor.submit(_generate_spec_critique, run_id, model, plan_content, drafts_text): model
+            executor.submit(_generate_tracker_critique, run_id, model, plan_content, drafts_text): model
             for model in models
         }
         
@@ -324,9 +339,9 @@ def run_spec_council(
                     failed_models.append(model)
     
     # 5. Chair synthesis
-    update_run_status(spec_run.id, "synthesizing")
+    update_run_status(tracker_run.id, "synthesizing")
     
-    critiques = get_artifacts(spec_run.id, kind="critique")
+    critiques = get_artifacts(tracker_run.id, kind="critique")
     critiques_text = ""
     for i, critique in enumerate(critiques, 1):
         critiques_text += f"\n### Critique {i} (from {critique.model})\n\n{critique.content}\n\n---\n"
@@ -336,14 +351,14 @@ def run_spec_council(
     today = date.today().isoformat()
     
     messages = [
-        Message(role="system", content=SPEC_CHAIR_PROMPT),
+        Message(role="system", content=TRACKER_CHAIR_PROMPT),
         Message(
             role="user",
             content=f"""## Approved Plan
 
 {plan_content}
 
-## Spec Drafts
+## Tracker Drafts
 
 {drafts_text}
 
@@ -353,7 +368,7 @@ def run_spec_council(
 
 ---
 
-Produce the final spec/spec.yaml content.
+Produce the final tracker/factory_tracker.yaml content.
 Use updated_at: {today}
 Output ONLY valid YAML, no markdown fences.""",
         ),
@@ -365,26 +380,26 @@ Output ONLY valid YAML, no markdown fences.""",
             messages=messages,
             model=chair_model,
             timeout=180.0,
-            phase="spec_chair",
+            phase="tracker_chair",
             run_id=run_id,
         )
         
         # Validate chair output is valid YAML before storing
-        spec_content = result.content
+        tracker_content = result.content
         
-        # S04: Strip markdown fences if present (```yaml ... ``` or ``` ... ```)
-        spec_content = spec_content.strip()
-        if spec_content.startswith("```"):
-            lines = spec_content.split("\n")
+        # Strip markdown fences if present (```yaml ... ``` or ``` ... ```)
+        tracker_content = tracker_content.strip()
+        if tracker_content.startswith("```"):
+            lines = tracker_content.split("\n")
             # Remove opening fence line (```yaml or ```)
             lines = lines[1:]
             # Remove closing fence if present
             if lines and lines[-1].strip() == "```":
                 lines = lines[:-1]
-            spec_content = "\n".join(lines).strip()
+            tracker_content = "\n".join(lines).strip()
         
         try:
-            parsed = yaml.safe_load(spec_content)
+            parsed = yaml.safe_load(tracker_content)
             
             # Require top-level dict
             if not isinstance(parsed, dict):
@@ -395,51 +410,55 @@ Output ONLY valid YAML, no markdown fences.""",
             if sv not in ("0.1", 0.1):
                 raise ValueError(f"schema_version must be 0.1, got: {sv}")
             
-            # Require project key
-            if "project" not in parsed:
-                raise ValueError("Missing required top-level key: project")
+            # Require steps key
+            if "steps" not in parsed:
+                raise ValueError("Missing required top-level key: steps")
             
-            # S04: Require updated_at key
-            if "updated_at" not in parsed:
-                raise ValueError("Missing required top-level key: updated_at")
+            # steps must be a list
+            if not isinstance(parsed["steps"], list):
+                raise ValueError("steps must be a list")
+            
+            # Require at least 1 step
+            if len(parsed["steps"]) < 1:
+                raise ValueError("At least 1 step is required in the tracker")
                 
         except yaml.YAMLError as ye:
             # YAML parse error - write error artifact and fail
-            error_msg = f"Chair output is not valid YAML:\n{ye}\n\nRaw output (first 2000 chars):\n{spec_content[:2000]}"
+            error_msg = f"Chair output is not valid YAML:\n{ye}\n\nRaw output (first 2000 chars):\n{tracker_content[:2000]}"
             write_artifact(
-                run_id=spec_run.id,
+                run_id=tracker_run.id,
                 kind="error",
                 content=error_msg,
                 model=chair_model,
             )
-            update_run_status(spec_run.id, "failed")
+            update_run_status(tracker_run.id, "failed")
             raise ValueError(f"Chair produced invalid YAML: {ye}")
         except ValueError as ve:
             # Validation error
-            error_msg = f"Chair output failed validation:\n{ve}\n\nRaw output (first 2000 chars):\n{spec_content[:2000]}"
+            error_msg = f"Chair output failed validation:\n{ve}\n\nRaw output (first 2000 chars):\n{tracker_content[:2000]}"
             write_artifact(
-                run_id=spec_run.id,
+                run_id=tracker_run.id,
                 kind="error",
                 content=error_msg,
                 model=chair_model,
             )
-            update_run_status(spec_run.id, "failed")
+            update_run_status(tracker_run.id, "failed")
             raise ValueError(f"Chair output failed validation: {ve}")
         
         # Store synthesis (raw chair output)
         write_artifact(
-            run_id=spec_run.id,
+            run_id=tracker_run.id,
             kind="synthesis",
             content=result.content,
             model=result.model,
             usage_json=result.usage,
         )
         
-        # Store as output artifact (validated, cleaned spec content)
+        # Store as output artifact (validated, cleaned tracker content)
         write_artifact(
-            run_id=spec_run.id,
+            run_id=tracker_run.id,
             kind="output",
-            content=spec_content,
+            content=tracker_content,
             model=result.model,
         )
         
@@ -448,16 +467,16 @@ Output ONLY valid YAML, no markdown fences.""",
         if "Chair produced invalid YAML" in str(e) or "Chair output failed validation" in str(e):
             raise
         write_artifact(
-            run_id=spec_run.id,
+            run_id=tracker_run.id,
             kind="error",
-            content=f"Spec chair synthesis failed: {str(e)}",
+            content=f"Tracker chair synthesis failed: {str(e)}",
             model=chair_model,
         )
-        update_run_status(spec_run.id, "failed")
+        update_run_status(tracker_run.id, "failed")
         raise ValueError(f"Chair synthesis failed: {e}")
     
     # 6. Set to waiting for approval
-    update_run_status(spec_run.id, "waiting_for_approval")
+    update_run_status(tracker_run.id, "waiting_for_approval")
     
     return run_id, failed_models
 

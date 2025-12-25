@@ -1,7 +1,13 @@
-"""Phase 2 Spec Council - generates spec/spec.yaml from an approved plan.
+"""Phase 2 Prompts Council - generates prompt templates from an approved plan.
 
 Usage:
-    council run spec --from-plan <plan_run_id> --project <slug> --models <list> --chair <model>
+    council run prompts --from-plan <plan_run_id> --project <slug> --models <list> --chair <model>
+
+Generates:
+- prompts/step_template.md
+- prompts/review_template.md
+- prompts/patch_template.md
+- prompts/chair_synthesis_template.md
 """
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -21,83 +27,116 @@ from agentic_mvp_factory.repo import (
 )
 
 
+# Required output keys in the envelope
+REQUIRED_PROMPT_KEYS = [
+    "prompts/step_template.md",
+    "prompts/review_template.md",
+    "prompts/patch_template.md",
+    "prompts/chair_synthesis_template.md",
+]
+
+
 # =============================================================================
 # PROMPTS
 # =============================================================================
 
-SPEC_SYSTEM_PROMPT = """You are a council member generating a project specification.
+PROMPTS_SYSTEM_PROMPT = """You are a council member generating prompt templates for a code assistant workflow.
 
-Your job is to produce a valid YAML document for spec/spec.yaml based on the approved plan.
+Your job is to produce a YAML envelope containing EXACTLY 4 prompt templates.
 
 CRITICAL FORMAT REQUIREMENTS:
 - Output ONLY valid YAML (NO markdown fences, NO ``` anywhere, NO explanations)
-- The YAML must start with these EXACT top-level keys in this order:
-  schema_version: "0.1"
-  updated_at: <today's date as YYYY-MM-DD>
-  project:
-    name: <project name>
-    slug: <project slug>
-    ...
+- The YAML must have this EXACT structure:
 
-Required top-level keys:
-- schema_version (must be "0.1")
-- updated_at (must be at TOP LEVEL, not nested)
-- project (contains name, slug, north_star, done_enough_v0)
-- constraints
-- non_goals_v0
+schema_version: "0.1"
+updated_at: <YYYY-MM-DD>
+outputs:
+  prompts/step_template.md: |
+    <markdown content for step execution prompt>
+  prompts/review_template.md: |
+    <markdown content for review/critique prompt>
+  prompts/patch_template.md: |
+    <markdown content for patch/fix prompt>
+  prompts/chair_synthesis_template.md: |
+    <markdown content for chair synthesis prompt>
 
-Optional keys: v0_mode, core_entities, cli_v0, storage_v0, open_questions, milestones_v0
+Template content guidelines:
+1. Each template should be 50-150 lines of markdown
+2. Use placeholders like {{step_id}}, {{allowed_files}}, {{proof_commands}}
+3. Reference ONLY canonical paths:
+   - tracker/factory_tracker.yaml (NOT tracker/tracker.yaml)
+   - docs/ARTIFACT_REGISTRY.md
+4. Emphasize "patch-only", "allowed_files", "proof commands"
+5. AVOID deprecated paths:
+   - tracker/tracker.yaml (WRONG)
+   - prompts/hotfix_sync.md (WRONG)
+   - docs/build_guide.md (WRONG)
 
-Stay within V0 scope. Keep it concise and actionable.
+Output ONLY the YAML envelope, nothing else.
 """
 
-SPEC_CRITIQUE_PROMPT = """You are reviewing a spec/spec.yaml draft.
+PROMPTS_CRITIQUE_PROMPT = """You are reviewing a prompts envelope draft.
 
 Check for:
-1. Valid YAML syntax
-2. All required sections present
-3. Alignment with the approved plan
-4. V0 scope constraints respected
-5. Clarity and actionability
+1. Valid YAML syntax (no markdown fences)
+2. Envelope has schema_version, updated_at, and outputs keys
+3. outputs contains EXACTLY these 4 keys:
+   - prompts/step_template.md
+   - prompts/review_template.md
+   - prompts/patch_template.md
+   - prompts/chair_synthesis_template.md
+4. Each template is non-empty markdown
+5. NO deprecated paths mentioned:
+   - tracker/tracker.yaml (should be tracker/factory_tracker.yaml)
+   - prompts/hotfix_sync.md (should not exist)
+   - docs/build_guide.md (should not exist)
+6. Templates emphasize patch-only, allowed_files, proof commands
+7. Placeholders are consistent and useful
 
-Provide specific, actionable feedback. Focus on correctness, not style."""
+Provide specific, actionable feedback. Be concise - 3-5 key points maximum."""
 
-SPEC_CHAIR_PROMPT = """You are the Chair synthesizing spec drafts and critiques.
+PROMPTS_CHAIR_PROMPT = """You are the Chair synthesizing prompt template drafts and critiques.
 
-Your task: produce the FINAL spec/spec.yaml content.
+Your task: produce the FINAL prompts envelope.
 
 CRITICAL FORMAT REQUIREMENTS:
 - Output ONLY raw YAML (NO markdown fences, NO ``` anywhere, NO explanations)
 - Start directly with YAML content, not with ```yaml
-- The output must be valid YAML that can be written directly to a file
+- The output must be valid YAML that can be parsed directly
 
-REQUIRED STRUCTURE (use these exact top-level keys):
+REQUIRED STRUCTURE (use EXACTLY these keys):
 schema_version: "0.1"
 updated_at: <YYYY-MM-DD>
-project:
-  name: ...
-  slug: ...
-  north_star: ...
-  done_enough_v0: ...
-constraints:
-  ...
-non_goals_v0:
-  - ...
+outputs:
+  prompts/step_template.md: |
+    ...markdown template...
+  prompts/review_template.md: |
+    ...markdown template...
+  prompts/patch_template.md: |
+    ...markdown template...
+  prompts/chair_synthesis_template.md: |
+    ...markdown template...
+
+IMPORTANT:
+- Include ALL 4 templates
+- Each template should be 50-150 lines
+- Use canonical paths only (tracker/factory_tracker.yaml, docs/ARTIFACT_REGISTRY.md)
+- AVOID deprecated paths (tracker/tracker.yaml, hotfix_sync.md, build_guide.md)
 
 Incorporate the best elements from all drafts. Address critique feedback.
-Output the complete YAML content and NOTHING else - no fences, no explanation."""
+Output the complete YAML envelope and NOTHING else."""
 
 
 # =============================================================================
 # COUNCIL FUNCTIONS
 # =============================================================================
 
-def _generate_spec_draft(
+def _generate_prompts_draft(
     run_id: str,
     model: str,
     plan_content: str,
 ) -> Tuple[str, Optional[str], Optional[str]]:
-    """Generate a single spec draft.
+    """Generate a single prompts envelope draft.
     
     Returns:
         (model, artifact_id or None, error or None)
@@ -107,7 +146,7 @@ def _generate_spec_draft(
     today = date.today().isoformat()
     
     messages = [
-        Message(role="system", content=SPEC_SYSTEM_PROMPT),
+        Message(role="system", content=PROMPTS_SYSTEM_PROMPT),
         Message(
             role="user",
             content=f"""## Approved Plan
@@ -116,7 +155,7 @@ def _generate_spec_draft(
 
 ---
 
-Generate the complete spec/spec.yaml content.
+Generate the complete prompts envelope with all 4 templates.
 Use updated_at: {today}
 Output ONLY valid YAML.""",
         ),
@@ -127,8 +166,8 @@ Output ONLY valid YAML.""",
             client=client,
             messages=messages,
             model=model,
-            timeout=120.0,
-            phase="spec_draft",
+            timeout=180.0,
+            phase="prompts_draft",
             run_id=run_id,
         )
         
@@ -147,19 +186,19 @@ Output ONLY valid YAML.""",
         write_artifact(
             run_id=UUID(run_id),
             kind="error",
-            content=f"Spec draft failed for {model}: {str(e)}",
+            content=f"Prompts draft failed for {model}: {str(e)}",
             model=model,
         )
         return (model, None, str(e))
 
 
-def _generate_spec_critique(
+def _generate_prompts_critique(
     run_id: str,
     model: str,
     plan_content: str,
     drafts_text: str,
 ) -> Tuple[str, Optional[str], Optional[str]]:
-    """Generate a spec critique.
+    """Generate a prompts critique.
     
     Returns:
         (model, artifact_id or None, error or None)
@@ -167,20 +206,20 @@ def _generate_spec_critique(
     client = get_openrouter_client()
     
     messages = [
-        Message(role="system", content=SPEC_CRITIQUE_PROMPT),
+        Message(role="system", content=PROMPTS_CRITIQUE_PROMPT),
         Message(
             role="user",
             content=f"""## Approved Plan
 
 {plan_content}
 
-## Spec Drafts
+## Prompts Envelope Drafts
 
 {drafts_text}
 
 ---
 
-Provide your critique of these spec drafts.""",
+Provide your critique of these prompts envelope drafts.""",
         ),
     ]
     
@@ -190,7 +229,7 @@ Provide your critique of these spec drafts.""",
             messages=messages,
             model=model,
             timeout=120.0,
-            phase="spec_critique",
+            phase="prompts_critique",
             run_id=run_id,
         )
         
@@ -208,19 +247,19 @@ Provide your critique of these spec drafts.""",
         write_artifact(
             run_id=UUID(run_id),
             kind="error",
-            content=f"Spec critique failed for {model}: {str(e)}",
+            content=f"Prompts critique failed for {model}: {str(e)}",
             model=model,
         )
         return (model, None, str(e))
 
 
-def run_spec_council(
+def run_prompts_council(
     plan_run_id: UUID,
     project_slug: str,
     models: List[str],
     chair_model: str,
 ) -> Tuple[str, List[str]]:
-    """Run a spec generation council.
+    """Run a prompts generation council.
     
     Args:
         plan_run_id: The approved plan run ID
@@ -260,17 +299,17 @@ def run_spec_council(
     
     plan_content = plan_artifacts[0].content
     
-    # 2. Create new run for spec generation
-    spec_run = create_run(
+    # 2. Create new run for prompts generation
+    prompts_run = create_run(
         project_slug=project_slug,
-        task_type="spec",
+        task_type="prompts",
         parent_run_id=plan_run_id,
     )
-    run_id = str(spec_run.id)
+    run_id = str(prompts_run.id)
     
     # Store the plan as a reference artifact
     write_artifact(
-        run_id=spec_run.id,
+        run_id=prompts_run.id,
         kind="packet",
         content=f"# Source Plan (from run {plan_run_id})\n\n{plan_content}",
         model=None,
@@ -279,12 +318,12 @@ def run_spec_council(
     failed_models: List[str] = []
     
     # 3. Generate drafts in parallel
-    update_run_status(spec_run.id, "drafting")
+    update_run_status(prompts_run.id, "drafting")
     
     draft_ids: List[str] = []
     with ThreadPoolExecutor(max_workers=len(models)) as executor:
         futures = {
-            executor.submit(_generate_spec_draft, run_id, model, plan_content): model
+            executor.submit(_generate_prompts_draft, run_id, model, plan_content): model
             for model in models
         }
         
@@ -296,14 +335,14 @@ def run_spec_council(
                 failed_models.append(model)
     
     if len(draft_ids) < 2:
-        update_run_status(spec_run.id, "failed")
+        update_run_status(prompts_run.id, "failed")
         raise ValueError(f"Only {len(draft_ids)} draft(s) succeeded. Need at least 2.")
     
     # 4. Generate critiques in parallel
-    update_run_status(spec_run.id, "critiquing")
+    update_run_status(prompts_run.id, "critiquing")
     
     # Format drafts for critique (no code fences to reduce chair mirroring fences)
-    drafts = get_artifacts(spec_run.id, kind="draft")
+    drafts = get_artifacts(prompts_run.id, kind="draft")
     drafts_text = ""
     for i, draft in enumerate(drafts, 1):
         drafts_text += f"\n=== DRAFT {i} (model={draft.model}) ===\n{draft.content}\n=== END DRAFT {i} ===\n"
@@ -311,7 +350,7 @@ def run_spec_council(
     critique_ids: List[str] = []
     with ThreadPoolExecutor(max_workers=len(models)) as executor:
         futures = {
-            executor.submit(_generate_spec_critique, run_id, model, plan_content, drafts_text): model
+            executor.submit(_generate_prompts_critique, run_id, model, plan_content, drafts_text): model
             for model in models
         }
         
@@ -324,9 +363,9 @@ def run_spec_council(
                     failed_models.append(model)
     
     # 5. Chair synthesis
-    update_run_status(spec_run.id, "synthesizing")
+    update_run_status(prompts_run.id, "synthesizing")
     
-    critiques = get_artifacts(spec_run.id, kind="critique")
+    critiques = get_artifacts(prompts_run.id, kind="critique")
     critiques_text = ""
     for i, critique in enumerate(critiques, 1):
         critiques_text += f"\n### Critique {i} (from {critique.model})\n\n{critique.content}\n\n---\n"
@@ -336,14 +375,14 @@ def run_spec_council(
     today = date.today().isoformat()
     
     messages = [
-        Message(role="system", content=SPEC_CHAIR_PROMPT),
+        Message(role="system", content=PROMPTS_CHAIR_PROMPT),
         Message(
             role="user",
             content=f"""## Approved Plan
 
 {plan_content}
 
-## Spec Drafts
+## Prompts Envelope Drafts
 
 {drafts_text}
 
@@ -353,7 +392,7 @@ def run_spec_council(
 
 ---
 
-Produce the final spec/spec.yaml content.
+Produce the final prompts envelope with all 4 templates.
 Use updated_at: {today}
 Output ONLY valid YAML, no markdown fences.""",
         ),
@@ -364,27 +403,27 @@ Output ONLY valid YAML, no markdown fences.""",
             client=client,
             messages=messages,
             model=chair_model,
-            timeout=180.0,
-            phase="spec_chair",
+            timeout=240.0,  # Longer timeout for 4 templates
+            phase="prompts_chair",
             run_id=run_id,
         )
         
         # Validate chair output is valid YAML before storing
-        spec_content = result.content
+        envelope_content = result.content
         
-        # S04: Strip markdown fences if present (```yaml ... ``` or ``` ... ```)
-        spec_content = spec_content.strip()
-        if spec_content.startswith("```"):
-            lines = spec_content.split("\n")
+        # Strip markdown fences if present (```yaml ... ``` or ``` ... ```)
+        envelope_content = envelope_content.strip()
+        if envelope_content.startswith("```"):
+            lines = envelope_content.split("\n")
             # Remove opening fence line (```yaml or ```)
             lines = lines[1:]
             # Remove closing fence if present
             if lines and lines[-1].strip() == "```":
                 lines = lines[:-1]
-            spec_content = "\n".join(lines).strip()
+            envelope_content = "\n".join(lines).strip()
         
         try:
-            parsed = yaml.safe_load(spec_content)
+            parsed = yaml.safe_load(envelope_content)
             
             # Require top-level dict
             if not isinstance(parsed, dict):
@@ -395,51 +434,68 @@ Output ONLY valid YAML, no markdown fences.""",
             if sv not in ("0.1", 0.1):
                 raise ValueError(f"schema_version must be 0.1, got: {sv}")
             
-            # Require project key
-            if "project" not in parsed:
-                raise ValueError("Missing required top-level key: project")
+            # Require outputs key
+            if "outputs" not in parsed:
+                raise ValueError("Missing required top-level key: outputs")
             
-            # S04: Require updated_at key
-            if "updated_at" not in parsed:
-                raise ValueError("Missing required top-level key: updated_at")
+            outputs = parsed["outputs"]
+            if not isinstance(outputs, dict):
+                raise ValueError("outputs must be a dict")
+            
+            # Check for EXACTLY the required 4 keys
+            missing_keys = [k for k in REQUIRED_PROMPT_KEYS if k not in outputs]
+            if missing_keys:
+                raise ValueError(f"Missing required output keys: {missing_keys}")
+            
+            extra_keys = [k for k in outputs.keys() if k not in REQUIRED_PROMPT_KEYS]
+            if extra_keys:
+                raise ValueError(f"Unexpected output keys: {extra_keys}")
+            
+            # Each value must be a non-empty string
+            for key in REQUIRED_PROMPT_KEYS:
+                val = outputs[key]
+                if not isinstance(val, str):
+                    raise ValueError(f"outputs['{key}'] must be a string, got {type(val).__name__}")
+                if not val.strip():
+                    raise ValueError(f"outputs['{key}'] is empty")
                 
         except yaml.YAMLError as ye:
             # YAML parse error - write error artifact and fail
-            error_msg = f"Chair output is not valid YAML:\n{ye}\n\nRaw output (first 2000 chars):\n{spec_content[:2000]}"
+            error_msg = f"Chair output is not valid YAML:\n{ye}\n\nRaw output (first 2000 chars):\n{envelope_content[:2000]}"
             write_artifact(
-                run_id=spec_run.id,
+                run_id=prompts_run.id,
                 kind="error",
                 content=error_msg,
                 model=chair_model,
             )
-            update_run_status(spec_run.id, "failed")
+            update_run_status(prompts_run.id, "failed")
             raise ValueError(f"Chair produced invalid YAML: {ye}")
         except ValueError as ve:
             # Validation error
-            error_msg = f"Chair output failed validation:\n{ve}\n\nRaw output (first 2000 chars):\n{spec_content[:2000]}"
+            error_msg = f"Chair output failed validation:\n{ve}\n\nRaw output (first 2000 chars):\n{envelope_content[:2000]}"
             write_artifact(
-                run_id=spec_run.id,
+                run_id=prompts_run.id,
                 kind="error",
                 content=error_msg,
                 model=chair_model,
             )
-            update_run_status(spec_run.id, "failed")
+            update_run_status(prompts_run.id, "failed")
             raise ValueError(f"Chair output failed validation: {ve}")
         
         # Store synthesis (raw chair output)
         write_artifact(
-            run_id=spec_run.id,
+            run_id=prompts_run.id,
             kind="synthesis",
             content=result.content,
             model=result.model,
             usage_json=result.usage,
         )
         
-        # Store as output artifact (validated, cleaned spec content)
+        # Store as output artifact (validated, cleaned envelope)
         write_artifact(
-            run_id=spec_run.id,
+            run_id=prompts_run.id,
             kind="output",
-            content=spec_content,
+            content=envelope_content,
             model=result.model,
         )
         
@@ -448,16 +504,16 @@ Output ONLY valid YAML, no markdown fences.""",
         if "Chair produced invalid YAML" in str(e) or "Chair output failed validation" in str(e):
             raise
         write_artifact(
-            run_id=spec_run.id,
+            run_id=prompts_run.id,
             kind="error",
-            content=f"Spec chair synthesis failed: {str(e)}",
+            content=f"Prompts chair synthesis failed: {str(e)}",
             model=chair_model,
         )
-        update_run_status(spec_run.id, "failed")
+        update_run_status(prompts_run.id, "failed")
         raise ValueError(f"Chair synthesis failed: {e}")
     
     # 6. Set to waiting for approval
-    update_run_status(spec_run.id, "waiting_for_approval")
+    update_run_status(prompts_run.id, "waiting_for_approval")
     
     return run_id, failed_models
 
