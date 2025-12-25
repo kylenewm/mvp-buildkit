@@ -169,7 +169,13 @@ def run():
     default=False,
     help="Validate Phase -1 artifacts before running (blocks if not READY)",
 )
-def run_plan(project: str, packet: str, models: str, chair: str, phase_1_check: bool):
+@click.option(
+    "--context",
+    type=click.Path(),
+    default=None,
+    help="Path to Phase 0 context pack file (e.g., phase_0/context_pack_lite.md)",
+)
+def run_plan(project: str, packet: str, models: str, chair: str, phase_1_check: bool, context: str):
     """Run a council planning workflow."""
     import os
     from pathlib import Path
@@ -222,9 +228,24 @@ def run_plan(project: str, packet: str, models: str, chair: str, phase_1_check: 
         click.echo("Error: At least 2 models are required.", err=True)
         raise SystemExit(1)
     
+    # S03: Validate and read context file if provided
+    context_content = None
+    if context:
+        context_path = Path(context)
+        if not context_path.exists():
+            click.echo(f"Error: Context file not found: {context}", err=True)
+            raise SystemExit(1)
+        try:
+            context_content = context_path.read_text()
+        except Exception as e:
+            click.echo(f"Error: Failed to read context file: {e}", err=True)
+            raise SystemExit(1)
+    
     click.echo(f"Running council plan workflow")
     click.echo(f"  Project: {project}")
     click.echo(f"  Packet: {packet}")
+    if context:
+        click.echo(f"  Context: {context}")
     click.echo(f"  Models: {model_list}")
     click.echo(f"  Chair: {chair}")
     click.echo()
@@ -243,6 +264,8 @@ def run_plan(project: str, packet: str, models: str, chair: str, phase_1_check: 
             packet_path=packet,
             models=model_list,
             chair_model=chair,
+            context_content=context_content,
+            context_path=context if context else None,
         )
         
         click.echo()

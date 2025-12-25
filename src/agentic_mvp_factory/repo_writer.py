@@ -1,19 +1,28 @@
-"""Repo writer module for committing outputs to target repo (S08)."""
+"""Repo writer module for committing outputs to target repo (S08).
 
+S02: Registry-driven allowlist - reads canonical/forbidden paths from
+docs/ARTIFACT_REGISTRY.md instead of hardcoding.
+"""
+
+import fnmatch
 import hashlib
 import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set, Tuple
 from uuid import UUID
 
 
-# Canonical stable paths (allowlist for commit outputs)
-# These are the ONLY root-level paths the commit can write (if missing)
-ALLOWED_PATHS = [
+# --- Registry Parser (S02) ---
+
+REGISTRY_PATH = "docs/ARTIFACT_REGISTRY.md"
+
+# Fallback constants (used if registry is missing/unparsable)
+_FALLBACK_CANONICAL = [
     "spec/spec.yaml",
     "tracker/factory_tracker.yaml",
     "invariants/invariants.md",
@@ -26,13 +35,121 @@ ALLOWED_PATHS = [
     "docs/ARTIFACT_REGISTRY.md",
 ]
 
-# Explicitly disallowed paths (deprecated, must NEVER be written)
-DISALLOWED_PATHS = [
+_FALLBACK_GENERATED = ["versions/**"]
+
+_FALLBACK_FORBIDDEN = [
     "prompts/hotfix_sync.md",
     "tracker/tracker.yaml",
     "docs/build_guide.md",
-    "COMMIT_MANIFEST.md",  # Only allowed inside versions/, not at repo root
+    "COMMIT_MANIFEST.md",
 ]
+
+
+@dataclass
+class ArtifactRegistry:
+    """Parsed artifact registry with canonical, generated, and forbidden paths."""
+    canonical: List[str] = field(default_factory=list)
+    generated: List[str] = field(default_factory=list)  # glob patterns
+    forbidden: List[str] = field(default_factory=list)
+    source: str = "fallback"  # "file" or "fallback"
+    
+    def is_allowed(self, path: str) -> bool:
+        """Check if path is allowed (canonical or matches generated glob)."""
+        if path in self.canonical:
+            return True
+        for pattern in self.generated:
+            if fnmatch.fnmatch(path, pattern):
+                return True
+        return False
+    
+    def is_forbidden(self, path: str) -> bool:
+        """Check if path is forbidden."""
+        return path in self.forbidden
+
+
+def parse_artifact_registry(registry_path: Path) -> Tuple[ArtifactRegistry, Optional[str]]:
+    """Parse docs/ARTIFACT_REGISTRY.md to extract canonical/generated/forbidden paths.
+    
+    Args:
+        registry_path: Path to the registry file
+        
+    Returns:
+        (ArtifactRegistry, error_message or None)
+    """
+    if not registry_path.exists():
+        return ArtifactRegistry(
+            canonical=_FALLBACK_CANONICAL.copy(),
+            generated=_FALLBACK_GENERATED.copy(),
+            forbidden=_FALLBACK_FORBIDDEN.copy(),
+            source="fallback",
+        ), f"Registry file not found: {registry_path}"
+    
+    try:
+        content = registry_path.read_text()
+    except Exception as e:
+        return ArtifactRegistry(
+            canonical=_FALLBACK_CANONICAL.copy(),
+            generated=_FALLBACK_GENERATED.copy(),
+            forbidden=_FALLBACK_FORBIDDEN.copy(),
+            source="fallback",
+        ), f"Failed to read registry: {e}"
+    
+    # Parse sections
+    canonical: List[str] = []
+    generated: List[str] = []
+    forbidden: List[str] = []
+    
+    current_section = None
+    
+    for line in content.splitlines():
+        line = line.strip()
+        
+        # Detect section headers
+        if line == "## Canonical":
+            current_section = "canonical"
+            continue
+        elif line == "## Generated":
+            current_section = "generated"
+            continue
+        elif line == "## Forbidden":
+            current_section = "forbidden"
+            continue
+        elif line.startswith("## ") or line.startswith("---"):
+            current_section = None
+            continue
+        
+        # Parse bullet items
+        if current_section and line.startswith("- "):
+            item = line[2:].strip()
+            if item:
+                if current_section == "canonical":
+                    canonical.append(item)
+                elif current_section == "generated":
+                    generated.append(item)
+                elif current_section == "forbidden":
+                    forbidden.append(item)
+    
+    # Validate we got something
+    if not canonical:
+        return ArtifactRegistry(
+            canonical=_FALLBACK_CANONICAL.copy(),
+            generated=_FALLBACK_GENERATED.copy(),
+            forbidden=_FALLBACK_FORBIDDEN.copy(),
+            source="fallback",
+        ), "No canonical paths found in registry"
+    
+    return ArtifactRegistry(
+        canonical=canonical,
+        generated=generated,
+        forbidden=forbidden,
+        source="file",
+    ), None
+
+
+# Legacy constants for backward compatibility (used by _validate_paths_allowed, etc.)
+# These will be populated from registry at runtime
+ALLOWED_PATHS = _FALLBACK_CANONICAL.copy()
+DISALLOWED_PATHS = _FALLBACK_FORBIDDEN.copy()
 
 LOCK_FILE = ".factory-lock"
 
@@ -93,10 +210,28 @@ def _release_lock(repo_path: Path) -> None:
         lock_file.unlink()
 
 
-def _is_git_repo(repo_path: Path) -> bool:
-    """Check if path is a git repository."""
-    git_dir = repo_path / ".git"
-    return git_dir.exists() and git_dir.is_dir()
+def _is_git_repo(repo_path: Path) -> tuple[bool, str]:
+    """Check if path is a git repository using git rev-parse.
+    
+    Returns:
+        (is_git_repo, error_message)
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_path), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip() == "true":
+            return True, ""
+        return False, result.stderr.strip() or "Not a git repository"
+    except subprocess.TimeoutExpired:
+        return False, "git rev-parse timed out"
+    except FileNotFoundError:
+        return False, "git command not found"
+    except Exception as e:
+        return False, f"git check failed: {e}"
 
 
 def _has_uncommitted_changes(repo_path: Path) -> tuple[bool, str]:
@@ -418,14 +553,37 @@ def commit_outputs(
     repo_path = Path(repo_path).resolve()
     repo_path.mkdir(parents=True, exist_ok=True)
     
-    # === FAIL-SAFE CHECKS ===
+    # === S02: Load Registry (single source of truth) ===
+    
+    # Try to load from the source repo's registry first (where council is run from)
+    source_registry_path = Path(REGISTRY_PATH)
+    registry, registry_error = parse_artifact_registry(source_registry_path)
+    
+    # Debug: show registry info
+    print(f"[S02] Registry loaded from: {registry.source}")
+    print(f"[S02] Canonical paths: {len(registry.canonical)}")
+    print(f"[S02] Generated patterns: {registry.generated}")
+    print(f"[S02] Forbidden paths: {registry.forbidden}")
+    
+    if registry_error and registry.source == "fallback":
+        raise RuntimeError(
+            f"COMMIT BLOCKED: ARTIFACT_REGISTRY missing or unparsable.\n"
+            f"  Path: {source_registry_path.resolve()}\n"
+            f"  Error: {registry_error}\n"
+            f"  Fix: Ensure docs/ARTIFACT_REGISTRY.md exists with ## Canonical section."
+        )
+    
+    # === FAIL-SAFE CHECKS (S01: Commit Safety Rails) ===
     
     # 1. Verify target is a git repo
-    if not _is_git_repo(repo_path):
+    is_git, git_error = _is_git_repo(repo_path)
+    if not is_git:
         raise RuntimeError(
             f"COMMIT BLOCKED: Target path is not a git repository.\n"
+            f"  Reason: non-git\n"
             f"  Path: {repo_path}\n"
-            f"  Initialize with: git init"
+            f"  Detail: {git_error}\n"
+            f"  Fix: Initialize with 'git init'"
         )
     
     # 2. Check for uncommitted changes (dirty repo)
@@ -433,28 +591,33 @@ def commit_outputs(
     if has_changes:
         raise RuntimeError(
             f"COMMIT BLOCKED: Target repo has uncommitted changes.\n"
+            f"  Reason: dirty repo\n"
             f"  Path: {repo_path}\n"
-            f"  Status:\n{status_output}\n"
-            f"  Commit or stash changes before running council commit."
+            f"  Offending files:\n{status_output}\n"
+            f"  Fix: Commit or stash changes before running council commit."
         )
     
-    # 3. Validate paths to write are all allowed
-    paths_to_write = ALLOWED_PATHS.copy()
+    # 3. Validate paths to write (using registry)
+    paths_to_write = registry.canonical.copy()
     
-    not_allowed = _validate_paths_allowed(paths_to_write)
+    # Check for forbidden paths first (takes precedence)
+    forbidden_in_write = [p for p in paths_to_write if registry.is_forbidden(p)]
+    if forbidden_in_write:
+        raise ValueError(
+            f"COMMIT BLOCKED: Attempted to write forbidden paths.\n"
+            f"  Reason: forbidden path (from registry)\n"
+            f"  Offending paths: {forbidden_in_write}\n"
+            f"  Forbidden (per docs/ARTIFACT_REGISTRY.md): {registry.forbidden}"
+        )
+    
+    # Check all paths are allowed (canonical or generated)
+    not_allowed = [p for p in paths_to_write if not registry.is_allowed(p)]
     if not_allowed:
         raise ValueError(
             f"COMMIT BLOCKED: Attempted to write non-canonical paths.\n"
-            f"  Blocked paths: {not_allowed}\n"
-            f"  Allowed paths: {ALLOWED_PATHS}"
-        )
-    
-    disallowed = _validate_paths_not_disallowed(paths_to_write)
-    if disallowed:
-        raise ValueError(
-            f"COMMIT BLOCKED: Attempted to write disallowed paths.\n"
-            f"  Blocked paths: {disallowed}\n"
-            f"  Disallowed: {DISALLOWED_PATHS}"
+            f"  Reason: non-canonical write (not in registry)\n"
+            f"  Offending paths: {not_allowed}\n"
+            f"  Allowed (per docs/ARTIFACT_REGISTRY.md): {registry.canonical}"
         )
     
     # 4. Additive-only mode: fail if any canonical file already exists
@@ -462,9 +625,9 @@ def commit_outputs(
     if existing:
         raise ValueError(
             f"COMMIT BLOCKED: Canonical files already exist (additive-only mode).\n"
-            f"  Existing files: {existing}\n"
-            f"  Remove these files or use a fresh repo to proceed.\n"
-            f"  (Override flag not implemented yet.)"
+            f"  Reason: overwrite\n"
+            f"  Offending files: {existing}\n"
+            f"  Fix: Remove these files or use a fresh repo to proceed."
         )
     
     # === END FAIL-SAFE CHECKS ===
@@ -489,23 +652,10 @@ def commit_outputs(
         snapshot_dir.mkdir(parents=True, exist_ok=True)
         manifest.snapshot_path = str(snapshot_dir.relative_to(repo_path))
         
-        # Validate: only write from allowlist (enforced by using ALLOWED_PATHS directly)
-        # This guard ensures no deprecated paths slip through
-        paths_to_write = ALLOWED_PATHS.copy()
-        for path in paths_to_write:
-            if path in DISALLOWED_PATHS:
-                raise ValueError(
-                    f"Commit blocked: path '{path}' is in disallowed list. "
-                    f"Allowed paths: {ALLOWED_PATHS}"
-                )
-            # Check for deprecated patterns in path
-            if any(disallowed in path for disallowed in DISALLOWED_PATHS):
-                raise ValueError(
-                    f"Commit blocked: path '{path}' matches disallowed pattern. "
-                    f"Disallowed: {DISALLOWED_PATHS}"
-                )
+        # S02: paths_to_write already validated against registry above
+        # (forbidden check + allowlist check already done)
         
-        # Write stable paths (all from allowlist)
+        # Write stable paths (all from registry canonical list)
         for path in paths_to_write:
             content = _generate_stub_content(
                 path=path,
@@ -608,14 +758,33 @@ def commit_spec_outputs(
     repo_path = Path(repo_path).resolve()
     repo_path.mkdir(parents=True, exist_ok=True)
     
-    # === FAIL-SAFE CHECKS ===
+    # === S02: Load Registry (single source of truth) ===
+    
+    source_registry_path = Path(REGISTRY_PATH)
+    registry, registry_error = parse_artifact_registry(source_registry_path)
+    
+    print(f"[S02] Registry loaded from: {registry.source}")
+    print(f"[S02] Canonical paths: {len(registry.canonical)}")
+    
+    if registry_error and registry.source == "fallback":
+        raise RuntimeError(
+            f"COMMIT BLOCKED: ARTIFACT_REGISTRY missing or unparsable.\n"
+            f"  Path: {source_registry_path.resolve()}\n"
+            f"  Error: {registry_error}\n"
+            f"  Fix: Ensure docs/ARTIFACT_REGISTRY.md exists with ## Canonical section."
+        )
+    
+    # === FAIL-SAFE CHECKS (S01: Commit Safety Rails) ===
     
     # 1. Verify target is a git repo
-    if not _is_git_repo(repo_path):
+    is_git, git_error = _is_git_repo(repo_path)
+    if not is_git:
         raise RuntimeError(
             f"COMMIT BLOCKED: Target path is not a git repository.\n"
+            f"  Reason: non-git\n"
             f"  Path: {repo_path}\n"
-            f"  Initialize with: git init"
+            f"  Detail: {git_error}\n"
+            f"  Fix: Initialize with 'git init'"
         )
     
     # 2. Check for uncommitted changes (dirty repo)
@@ -623,21 +792,40 @@ def commit_spec_outputs(
     if has_changes:
         raise RuntimeError(
             f"COMMIT BLOCKED: Target repo has uncommitted changes.\n"
+            f"  Reason: dirty repo\n"
             f"  Path: {repo_path}\n"
-            f"  Status:\n{status_output}\n"
-            f"  Commit or stash changes before running council commit."
+            f"  Offending files:\n{status_output}\n"
+            f"  Fix: Commit or stash changes before running council commit."
         )
     
-    # 3. Spec-only allowlist
+    # 3. Spec-only allowlist (validated against registry)
     spec_allowed_path = "spec/spec.yaml"
+    
+    # Check forbidden first
+    if registry.is_forbidden(spec_allowed_path):
+        raise ValueError(
+            f"COMMIT BLOCKED: spec/spec.yaml is forbidden.\n"
+            f"  Reason: forbidden path (from registry)\n"
+            f"  Forbidden (per docs/ARTIFACT_REGISTRY.md): {registry.forbidden}"
+        )
+    
+    # Check it's in canonical list
+    if not registry.is_allowed(spec_allowed_path):
+        raise ValueError(
+            f"COMMIT BLOCKED: spec/spec.yaml is not in allowlist.\n"
+            f"  Reason: non-canonical write (not in registry)\n"
+            f"  Offending paths: [{spec_allowed_path}]\n"
+            f"  Allowed (per docs/ARTIFACT_REGISTRY.md): {registry.canonical}"
+        )
     
     # 4. Additive-only: fail if spec/spec.yaml already exists
     existing = _check_existing_files(repo_path, [spec_allowed_path])
     if existing:
         raise ValueError(
             f"COMMIT BLOCKED: spec/spec.yaml already exists (additive-only mode).\n"
-            f"  Path: {repo_path / spec_allowed_path}\n"
-            f"  Remove this file or use a fresh repo to proceed."
+            f"  Reason: overwrite\n"
+            f"  Offending files: {existing}\n"
+            f"  Fix: Remove this file or use a fresh repo to proceed."
         )
     
     # === END FAIL-SAFE CHECKS ===

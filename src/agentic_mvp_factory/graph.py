@@ -42,6 +42,10 @@ class CouncilState(TypedDict, total=False):
     packet_path: str
     packet_content: str
     
+    # S03: Phase 0 context injection
+    context_path: Optional[str]
+    context_content: Optional[str]
+    
     # Artifact IDs (as strings for Studio readability)
     packet_artifact_id: Optional[str]
     draft_artifact_ids: List[str]
@@ -77,8 +81,15 @@ def _generate_single_draft(
     run_id: str,
     model: str,
     packet_content: str,
+    context_content: Optional[str] = None,
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Generate a single draft for one model.
+    
+    Args:
+        run_id: The run ID
+        model: Model ID to use
+        packet_content: The planning packet content
+        context_content: Optional Phase 0 context pack content (S03)
     
     Returns:
         Tuple of (model, artifact_id or None, error_message or None)
@@ -93,9 +104,17 @@ Your job is to produce a concrete, implementable plan based on the packet's requ
 Be specific, actionable, and stay within the stated constraints.
 Output a coherent plan with clear sections."""
     
+    # S03: Build user message with optional context
+    user_content = f"## Planning Packet\n\n{packet_content}"
+    
+    if context_content:
+        user_content += f"\n\n## Context Pack (Phase 0 Lite)\n\n{context_content}"
+    
+    user_content += "\n\n---\n\nProduce your implementation plan."
+    
     messages = [
         Message(role="system", content=system_prompt),
-        Message(role="user", content=f"## Planning Packet\n\n{packet_content}\n\n---\n\nProduce your implementation plan."),
+        Message(role="user", content=user_content),
     ]
     
     try:
@@ -130,8 +149,15 @@ def _generate_single_critique(
     run_id: str,
     model: str,
     drafts_text: str,
+    context_content: Optional[str] = None,
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Generate a single critique for one model.
+    
+    Args:
+        run_id: The run ID
+        model: Model ID to use
+        drafts_text: Formatted text of all drafts
+        context_content: Optional Phase 0 context pack content (S03)
     
     Returns:
         Tuple of (model, artifact_id or None, error_message or None)
@@ -149,9 +175,17 @@ Review all drafts and provide constructive critique:
 - Flag any constraint violations
 Be direct and specific."""
     
+    # S03: Build user message with optional context
+    user_content = f"## Drafts to Critique\n{drafts_text}"
+    
+    if context_content:
+        user_content = f"## Context Pack (Phase 0 Lite)\n\n{context_content}\n\n" + user_content
+    
+    user_content += "\n\nProvide your critique of these drafts."
+    
     messages = [
         Message(role="system", content=system_prompt),
-        Message(role="user", content=f"## Drafts to Critique\n{drafts_text}\n\nProvide your critique of these drafts."),
+        Message(role="user", content=user_content),
     ]
     
     try:
@@ -192,6 +226,7 @@ def load_packet(state: CouncilState) -> CouncilState:
     
     packet_path = state.get("packet_path", "")
     run_id = state.get("run_id", "")
+    context_path = state.get("context_path")  # S03: optional context path
     
     # Handle missing required fields (e.g., when invoked from Studio)
     if not packet_path:
@@ -218,18 +253,23 @@ def load_packet(state: CouncilState) -> CouncilState:
     
     content = path.read_text()
     
+    # S03: Append context note if provided
+    artifact_content = content
+    if context_path:
+        artifact_content += f"\n\n---\n(context provided: {context_path})"
+    
     # Store as artifact
     artifact = write_artifact(
         run_id=UUID(run_id),
         kind="packet",
-        content=content,
+        content=artifact_content,
         model=None,
     )
     
     return {
         **state,
         "phase": "loading",
-        "packet_content": content,
+        "packet_content": content,  # Original content for prompts
         "packet_artifact_id": str(artifact.id),
     }
 
@@ -239,6 +279,7 @@ def draft_generate(state: CouncilState) -> CouncilState:
     run_id = state.get("run_id", "")
     models = state.get("models", [])
     packet_content = state.get("packet_content", "")
+    context_content = state.get("context_content")  # S03: optional context
     
     # Handle missing required fields
     if not run_id or not models or not packet_content:
@@ -254,10 +295,10 @@ def draft_generate(state: CouncilState) -> CouncilState:
     draft_ids: List[str] = []
     failed_models: List[str] = []
     
-    # Run drafts in parallel
+    # Run drafts in parallel (S03: pass context)
     with ThreadPoolExecutor(max_workers=len(models)) as executor:
         futures = {
-            executor.submit(_generate_single_draft, run_id, model, packet_content): model
+            executor.submit(_generate_single_draft, run_id, model, packet_content, context_content): model
             for model in models
         }
         
@@ -297,6 +338,7 @@ def critique_generate(state: CouncilState) -> CouncilState:
     run_id = state.get("run_id", "")
     models = state.get("models", [])
     failed_models = list(state.get("failed_models", []))
+    context_content = state.get("context_content")  # S03: optional context
     
     # Handle missing required fields
     if not run_id or not models:
@@ -325,10 +367,10 @@ def critique_generate(state: CouncilState) -> CouncilState:
     
     critique_ids: List[str] = []
     
-    # Run critiques in parallel
+    # Run critiques in parallel (S03: pass context)
     with ThreadPoolExecutor(max_workers=len(models)) as executor:
         futures = {
-            executor.submit(_generate_single_critique, run_id, model, drafts_text): model
+            executor.submit(_generate_single_critique, run_id, model, drafts_text, context_content): model
             for model in models
         }
         
@@ -357,6 +399,7 @@ def chair_synthesize(state: CouncilState) -> CouncilState:
     run_id = state.get("run_id", "")
     chair_model = state.get("chair_model", "")
     packet_content = state.get("packet_content", "")
+    context_content = state.get("context_content")  # S03: optional context
     
     # Handle missing required fields
     if not run_id or not chair_model:
@@ -398,12 +441,13 @@ Output two sections:
 1. SYNTHESIS: The final unified plan
 2. DECISION_PACKET: A compact summary with key decisions, next actions, and risks"""
     
-    messages = [
-        Message(role="system", content=synthesis_system),
-        Message(
-            role="user",
-            content=f"""## Original Packet
-{packet_content}
+    # S03: Build user message with optional context
+    user_content = f"## Original Packet\n{packet_content}"
+    
+    if context_content:
+        user_content += f"\n\n## Context Pack (Phase 0 Lite)\n\n{context_content}"
+    
+    user_content += f"""
 
 ## Council Drafts
 {drafts_text}
@@ -413,8 +457,11 @@ Output two sections:
 
 ---
 
-Produce your synthesis and decision packet.""",
-        ),
+Produce your synthesis and decision packet."""
+    
+    messages = [
+        Message(role="system", content=synthesis_system),
+        Message(role="user", content=user_content),
     ]
     
     try:
@@ -545,6 +592,8 @@ def run_council(
     models: List[str],
     chair_model: str,
     on_progress: Optional[callable] = None,
+    context_content: Optional[str] = None,
+    context_path: Optional[str] = None,
 ) -> Tuple[str, List[str]]:
     """
     Run the council workflow (CLI entrypoint).
@@ -555,6 +604,8 @@ def run_council(
         models: List of model IDs to use for drafts/critiques
         chair_model: Model ID for chair synthesis
         on_progress: Optional callback for progress updates
+        context_content: Optional Phase 0 context pack content (S03)
+        context_path: Optional path to context file for artifact note (S03)
     
     Returns:
         Tuple of (run_id as string, list of failed models)
@@ -574,6 +625,8 @@ def run_council(
         "chair_model": chair_model,
         "packet_path": packet_path,
         "packet_content": "",
+        "context_content": context_content,  # S03
+        "context_path": context_path,  # S03
         "packet_artifact_id": None,
         "draft_artifact_ids": [],
         "critique_artifact_ids": [],
