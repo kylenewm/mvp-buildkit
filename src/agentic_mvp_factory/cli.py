@@ -2020,7 +2020,7 @@ def research_command(
         output_path=out_path,
         provider=provider,
         max_results_per_question=max_results,
-        findings_per_question=2,  # Keep bounded
+        findings_per_question=3,  # Top 3 findings per question
         mark_sufficient=mark_sufficient,
     )
     

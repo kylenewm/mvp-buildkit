@@ -18,7 +18,15 @@ class SearchResult:
     url: str
     title: str
     snippet: str
-    score: float = 0.0  # Rerank score if reranked, else engine score
+    score: float = 0.0  # Tavily relevance score
+
+
+@dataclass
+class SearchResponse:
+    """Response from a search query."""
+    results: List[SearchResult]
+    answer_summary: str = ""  # Tavily's AI-generated answer (response-level)
+    request_id: Optional[str] = None
 
 
 class SearchClientError(Exception):
@@ -30,7 +38,7 @@ class SearchClient(ABC):
     """Abstract interface for search clients."""
     
     @abstractmethod
-    def search(self, query: str, max_results: int = 3) -> List[SearchResult]:
+    def search(self, query: str, max_results: int = 5) -> SearchResponse:
         """
         Execute a search query.
         
@@ -39,7 +47,7 @@ class SearchClient(ABC):
             max_results: Maximum results to return
         
         Returns:
-            List of SearchResult
+            SearchResponse with results and optional answer_summary
         
         Raises:
             SearchClientError: On API or network errors
@@ -53,7 +61,7 @@ class TavilyClient(SearchClient):
     Docs: https://docs.tavily.com/
     
     Uses Tavily's advanced search with answer generation.
-    After each search, `last_answer` contains Tavily's synthesized answer.
+    Returns SearchResponse with results + answer_summary.
     """
     
     BASE_URL = "https://api.tavily.com/search"
@@ -75,20 +83,16 @@ class TavilyClient(SearchClient):
         self.topic = topic
         self.time_range = time_range
         self.exclude_domains = exclude_domains or ["reddit.com", "linkedin.com"]
-        # Store last answer for caller to access (V0: single-threaded OK)
-        self.last_answer: str = ""
     
-    def search(self, query: str, max_results: int = 5) -> List[SearchResult]:
-        """Search Tavily and return results.
-        
-        After calling, access `self.last_answer` for Tavily's synthesized answer.
+    def search(self, query: str, max_results: int = 5) -> SearchResponse:
+        """Search Tavily and return results with answer_summary.
         
         Args:
             query: Search query
             max_results: Number of results to return (default 5)
         
         Returns:
-            List of SearchResult with Tavily's relevance scores.
+            SearchResponse with results and answer_summary.
         """
         payload = {
             "api_key": self.api_key,
@@ -119,8 +123,9 @@ class TavilyClient(SearchClient):
         except httpx.RequestError as e:
             raise SearchClientError(f"Tavily network error: {e}")
         
-        # Store Tavily's answer for caller
-        self.last_answer = data.get("answer", "") or ""
+        # Extract response-level answer
+        answer_summary = data.get("answer", "") or ""
+        request_id = data.get("request_id")
         
         # Parse results
         results = []
@@ -139,7 +144,11 @@ class TavilyClient(SearchClient):
                 score=item.get("score", 0.0),
             ))
         
-        return results
+        return SearchResponse(
+            results=results,
+            answer_summary=answer_summary,
+            request_id=request_id,
+        )
 
 
 def _clean_snippet(text: str) -> str:

@@ -61,6 +61,13 @@
         "items": { "type": "string", "minLength": 1, "maxLength": 200 },
         "maxItems": 20
       },
+
+      "assumptions": {
+        "type": "array",
+        "description": "Assumptions the build relies on",
+        "items": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "maxItems": 10
+      },
   
       "tags": {
         "type": "array",

@@ -3,15 +3,154 @@
 Reads research_snapshot.yaml, searches for each question, populates findings.
 """
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 import yaml
 
-from .search_clients import SearchClient, SearchResult, get_search_client
+from .constants import DEFAULT_TRIAGE_MODEL, DEFAULT_TRIAGE_TIMEOUT_S
+from .model_client import Message, OpenRouterClient, ModelClientError, traced_complete
+from .search_clients import SearchClient, SearchResult, SearchResponse, get_search_client
+
+
+# ---------------------------------------------------------------------------
+# Triage prompts
+# ---------------------------------------------------------------------------
+TRIAGE_SYSTEM_PROMPT = """You classify evidence snippets into buckets so humans can skim high-signal items first. Do NOT rewrite or invent facts."""
+
+TRIAGE_USER_TEMPLATE = """research_question: {question}
+page_title: {page_title}
+source_url: {source_url}
+evidence_snippet: {evidence_snippet}
+
+Classify into ONE bucket:
+- "high": Concrete facts/metrics/definitions that directly answer the question.
+- "normal": Relevant but partial/tangential or requires inference.
+- "low": Weak signal, generic, ambiguous, but not junk.
+- "junk": Cookies/privacy, nav/footer, login/signup, ads, TOC, marketing fluff, scraped UI chrome, unrelated docs.
+
+Please keep the reason under 120 characters. 
+
+Return JSON ONLY (no fences): {{"bucket": "high"|"normal"|"low"|"junk", "reason": "<120 chars>"}}"""
+
+
+@dataclass
+class TriageResult:
+    """Result from triage LLM call."""
+    bucket: str  # "high", "normal", "low", "junk"
+    reason: str
+
+
+def _default_triage() -> TriageResult:
+    """Return default triage result for failures."""
+    return TriageResult(
+        bucket="normal",
+        reason="triage_failed",
+    )
+
+
+def _parse_triage_response(content: str) -> TriageResult:
+    """Parse LLM JSON response into TriageResult."""
+    content = content.strip()
+    if content.startswith("```"):
+        lines = content.split("\n")
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        content = "\n".join(lines)
+    
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        return _default_triage()
+    
+    bucket = data.get("bucket", "normal")
+    if bucket not in ("high", "normal", "low", "junk"):
+        bucket = "normal"
+    
+    reason = str(data.get("reason", ""))[:150]
+    
+    return TriageResult(bucket=bucket, reason=reason)
+
+
+def _triage_finding(
+    client: OpenRouterClient,
+    question: str,
+    page_title: str,
+    source_url: str,
+    evidence_snippet: str,
+    run_id: str = "",
+) -> TriageResult:
+    """
+    Run LLM triage on a single finding via traced_complete.
+    
+    Returns TriageResult with verdict. On failure, returns safe defaults.
+    """
+    user_prompt = TRIAGE_USER_TEMPLATE.format(
+        question=question,
+        page_title=page_title,
+        source_url=source_url,
+        evidence_snippet=evidence_snippet[:1500],  # Cap snippet length
+    )
+    
+    messages = [
+        Message(role="system", content=TRIAGE_SYSTEM_PROMPT),
+        Message(role="user", content=user_prompt),
+    ]
+    
+    try:
+        result = traced_complete(
+            client=client,
+            messages=messages,
+            model=DEFAULT_TRIAGE_MODEL,
+            timeout=DEFAULT_TRIAGE_TIMEOUT_S,
+            phase="triage",
+            run_id=run_id,
+        )
+        return _parse_triage_response(result.content)
+    except ModelClientError:
+        return _default_triage()
+    except Exception:
+        return _default_triage()
+
+
+def _get_triage_client() -> Optional[OpenRouterClient]:
+    """Get OpenRouter client for triage, or None if not configured."""
+    try:
+        return OpenRouterClient()
+    except ModelClientError:
+        return None
+
+
+def _bucket_sort_key(finding: dict, original_idx: int) -> tuple:
+    """Sort key: high=0, normal=1, low=2, junk=3, then original index."""
+    bucket = finding.get("triage_bucket", "normal")
+    rank = {"high": 0, "normal": 1, "low": 2, "junk": 3}.get(bucket, 1)
+    return (rank, original_idx)
+
+
+def _sort_findings_by_triage(findings: List[dict]) -> List[dict]:
+    """
+    Sort findings by triage_bucket within each rq_id.
+    Order: high → normal → low → junk. Stable within bucket.
+    """
+    from collections import OrderedDict
+    by_rq: Dict[str, List[tuple]] = OrderedDict()
+    
+    for idx, finding in enumerate(findings):
+        rq_id = finding.get("rq_id", "")
+        if rq_id not in by_rq:
+            by_rq[rq_id] = []
+        by_rq[rq_id].append((idx, finding))
+    
+    sorted_findings = []
+    for rq_id, items in by_rq.items():
+        sorted_items = sorted(items, key=lambda x: _bucket_sort_key(x[1], x[0]))
+        sorted_findings.extend([item[1] for item in sorted_items])
+    
+    return sorted_findings
 
 
 @dataclass
@@ -67,13 +206,43 @@ def _build_query(question: dict) -> str:
     return query
 
 
-def _result_to_source(result: SearchResult) -> dict:
-    """Convert a SearchResult to a source dict for answers section."""
-    return {
-        "url": result.url,
-        "title": result.title,
-        "snippet": result.snippet[:1500] if result.snippet else "",
-    }
+def _derive_claim_label(snippet: str, fallback_title: str, max_len: int = 160) -> str:
+    """
+    Derive a scannable claim label from the evidence snippet.
+    
+    V1 TODO: For strict claim verification, fetch page HTML and extract
+    sentence-level quotes anchored to spans.
+    V0 intentionally stores only Tavily snippets for human review.
+    """
+    if not snippet or not snippet.strip():
+        return fallback_title[:max_len] if fallback_title else ""
+    
+    # Split snippet into lines and find first meaningful line
+    lines = snippet.split("\n")
+    for line in lines:
+        # Clean the line
+        cleaned = line.strip()
+        if not cleaned:
+            continue
+        
+        # Remove markdown heading prefix: ^#+\s+
+        cleaned = re.sub(r'^#+\s+', '', cleaned)
+        
+        # Remove list markers: ^[-*•]\s+ or ^\d+\.\s+
+        cleaned = re.sub(r'^[-*•]\s+', '', cleaned)
+        cleaned = re.sub(r'^\d+\.\s+', '', cleaned)
+        
+        # Collapse internal whitespace
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        
+        if cleaned:
+            # Truncate if too long
+            if len(cleaned) > max_len:
+                return cleaned[:max_len - 1] + "…"
+            return cleaned
+    
+    # No usable line found
+    return fallback_title[:max_len] if fallback_title else ""
 
 
 def _result_to_finding(
@@ -81,28 +250,24 @@ def _result_to_finding(
     finding_id: str,
     retrieved_at: str,
     rq_id: Optional[str] = None,
+    triage: Optional[TriageResult] = None,
 ) -> dict:
-    """Convert a SearchResult to a finding dict."""
+    """Convert a SearchResult to a finding dict with proper V0 semantics."""
     is_tier1 = _is_tier1_url(result.url)
     
-    # Claim = title (or first sentence of snippet if title empty)
-    claim = result.title
-    if not claim and result.snippet:
-        # Use first sentence of snippet
-        first_sentence = result.snippet.split(". ")[0]
-        claim = _trim_to_length(first_sentence, 200)
-    elif len(claim) > 200:
-        claim = _trim_to_length(claim, 200)
+    # evidence_snippet = the actual Tavily snippet (up to 1500 chars)
+    evidence_snippet = result.snippet.strip() if result.snippet else ""
     
-    # Excerpt = snippet (already trimmed to 800 by client)
-    excerpt = result.snippet.strip() if result.snippet else ""
+    # claim = derived label for scanning (NOT just title)
+    claim = _derive_claim_label(evidence_snippet, result.title)
     
     finding = {
         "id": finding_id,
         "claim": claim,
+        "evidence_snippet": evidence_snippet,
+        "page_title": result.title,
         "source_url": result.url,
         "retrieved_at": retrieved_at,
-        "excerpt": excerpt,
         "tier": "tier1_official" if is_tier1 else "tier2_reputable",
         "confidence": "high" if is_tier1 else "med",
     }
@@ -110,6 +275,11 @@ def _result_to_finding(
     # Add rq_id if provided (trace back to research question)
     if rq_id:
         finding["rq_id"] = rq_id
+    
+    # Add triage fields if available
+    if triage:
+        finding["triage_bucket"] = triage.bucket
+        finding["triage_reason"] = triage.reason
     
     return finding
 
@@ -126,22 +296,21 @@ def run_research(
     input_path: Path,
     output_path: Path,
     provider: str,
-    max_results_per_question: int = 10,
+    max_results_per_question: int = 8,
     findings_per_question: int = 3,
     mark_sufficient: bool = False,
 ) -> ResearchRunResult:
     """
     Run research for all questions in research_snapshot.yaml.
     
-    Fetches max_results_per_question candidates, filters/ranks for relevance,
-    and selects top findings_per_question for each research question.
+    Calls Tavily once per question, stores answer_summary + top findings.
     
     Args:
         input_path: Path to input research_snapshot.yaml
         output_path: Path to write updated research_snapshot.yaml
-        provider: Search provider ("tavily" or "exa")
-        max_results_per_question: Max search results to fetch (for filtering)
-        findings_per_question: Max findings to keep per question after filtering
+        provider: Search provider ("tavily")
+        max_results_per_question: Max search results to fetch (default 5)
+        findings_per_question: Max findings to keep per question (default 5)
         mark_sufficient: If True, set sufficiency.status to "sufficient"
     
     Returns:
@@ -187,6 +356,10 @@ def run_research(
             error=str(e),
         )
     
+    # Get triage client (optional - triage is advisory)
+    triage_client = _get_triage_client()
+    build_id = data.get("build_id", "")
+    
     # Get size caps
     size_caps = data.get("size_caps", {})
     max_lines = size_caps.get("max_lines", 150)
@@ -212,7 +385,7 @@ def run_research(
             continue
         
         try:
-            results = client.search(query, max_results=max_results_per_question)
+            response: SearchResponse = client.search(query, max_results=max_results_per_question)
         except Exception as e:
             # Log but continue - don't fail entire run for one question
             print(f"  ⚠️  Search failed for '{query[:50]}...': {e}")
@@ -220,35 +393,47 @@ def run_research(
         
         questions_processed += 1
         
-        # Get Tavily's synthesized answer (stored on client after search)
-        tavily_answer = getattr(client, "last_answer", "") or ""
+        # Store per-question answer_summary (Tavily's AI synthesis)
+        # No sources here - findings is the source of truth for evidence
+        new_answers.append({
+            "rq_id": rq_id,
+            "question": question_text,
+            "answer_summary": response.answer_summary or "",
+        })
         
-        # Build sources from results (top N with non-empty snippets)
-        sources = []
-        for result in results[:findings_per_question]:
-            if result.snippet and len(result.snippet.strip()) >= 60:
-                sources.append(_result_to_source(result))
-        
-        # Store answer entry (Tavily answer + supporting sources)
-        if tavily_answer or sources:
-            new_answers.append({
-                "rq_id": rq_id,
-                "question": question_text,
-                "answer": tavily_answer,
-                "sources": sources,
-            })
-        
-        # Also create findings for backwards compatibility
-        for result in results[:findings_per_question]:
-            if not result.snippet or len(result.snippet.strip()) < 60:
+        # Create findings from top results (with non-empty snippets)
+        count = 0
+        for result in response.results:
+            if count >= findings_per_question:
+                break
+            # Only filter completely empty snippets
+            if not result.snippet or not result.snippet.strip():
                 continue
+            
+            # Run triage if client available
+            triage = None
+            if triage_client:
+                triage = _triage_finding(
+                    client=triage_client,
+                    question=question_text,
+                    page_title=result.title,
+                    source_url=result.url,
+                    evidence_snippet=result.snippet,
+                    run_id=build_id,
+                )
+            
             finding_id = f"F{next_finding_num}"
-            finding = _result_to_finding(result, finding_id, now, rq_id=rq_id)
+            finding = _result_to_finding(result, finding_id, now, rq_id=rq_id, triage=triage)
             new_findings.append(finding)
             next_finding_num += 1
+            count += 1
     
     # Combine findings
     all_findings = existing_findings + new_findings
+    
+    # Sort new findings by triage within each RQ (keep=true first, then high→normal→low)
+    if triage_client and new_findings:
+        all_findings = existing_findings + _sort_findings_by_triage(new_findings)
     
     # Store answers (replace any existing)
     data["answers"] = new_answers

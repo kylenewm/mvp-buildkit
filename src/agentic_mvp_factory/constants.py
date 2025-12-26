@@ -1,5 +1,7 @@
 """Constants for the council runner."""
 
+import os
+
 # Default models for council workflows, temporary defaults for testing purposes due to lower latency
 DEFAULT_MODELS = [
     "google/gemini-2.5-flash-lite",
@@ -7,6 +9,10 @@ DEFAULT_MODELS = [
 ]
 
 DEFAULT_CHAIR_MODEL = "google/gemini-3-flash-preview"
+
+# Triage model: cheap + fast, uses first default model
+DEFAULT_TRIAGE_MODEL = os.getenv("COUNCIL_TRIAGE_MODEL", DEFAULT_MODELS[0])
+DEFAULT_TRIAGE_TIMEOUT_S = float(os.getenv("COUNCIL_TRIAGE_TIMEOUT_S", "10"))
 
 
 

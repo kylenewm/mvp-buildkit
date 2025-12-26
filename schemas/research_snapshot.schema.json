@@ -71,17 +71,45 @@
         }
       },
   
+      "answers": {
+        "type": "array",
+        "description": "Per-question answer summaries from Tavily AI synthesis",
+        "maxItems": 20,
+        "items": {
+          "type": "object",
+          "required": ["rq_id", "question", "answer_summary"],
+          "properties": {
+            "rq_id": {
+              "type": "string",
+              "pattern": "^RQ[0-9]+$"
+            },
+            "question": {
+              "type": "string",
+              "maxLength": 300
+            },
+            "answer_summary": {
+              "type": "string",
+              "description": "Tavily AI-generated synthesis (non-authoritative)",
+              "maxLength": 2000
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+
       "findings": {
         "type": "array",
-        "maxItems": 50,
+        "description": "Evidence snippets from search results",
+        "maxItems": 75,
         "items": {
           "type": "object",
           "required": [
             "id",
             "claim",
+            "evidence_snippet",
+            "page_title",
             "source_url",
-            "retrieved_at",
-            "excerpt"
+            "retrieved_at"
           ],
           "properties": {
             "id": {
@@ -90,7 +118,19 @@
             },
             "claim": {
               "type": "string",
+              "description": "Scannable label derived from snippet (max 160 chars)",
               "minLength": 1,
+              "maxLength": 200
+            },
+            "evidence_snippet": {
+              "type": "string",
+              "description": "Tavily content snippet (source of truth for review)",
+              "minLength": 1,
+              "maxLength": 1600
+            },
+            "page_title": {
+              "type": "string",
+              "description": "Title of the source page",
               "maxLength": 300
             },
             "source_url": {
@@ -101,10 +141,10 @@
               "type": "string",
               "format": "date-time"
             },
-            "excerpt": {
+            "rq_id": {
               "type": "string",
-              "minLength": 1,
-              "maxLength": 800
+              "description": "Links finding back to research question",
+              "pattern": "^RQ[0-9]+$"
             },
             "tier": {
               "type": "string",
@@ -114,18 +154,15 @@
               "type": "string",
               "enum": ["low", "med", "high"]
             },
-            "tags": {
-              "type": "array",
-              "maxItems": 5,
-              "items": {
-                "type": "string",
-                "minLength": 2,
-                "maxLength": 40
-              }
-            },
-            "notes": {
+            "triage_bucket": {
               "type": "string",
-              "maxLength": 300
+              "enum": ["high", "normal", "low", "junk"],
+              "description": "LLM triage bucket for sorting (high first, junk last)"
+            },
+            "triage_reason": {
+              "type": "string",
+              "maxLength": 150,
+              "description": "LLM triage reason (single sentence)"
             }
           },
           "additionalProperties": false
