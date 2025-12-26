@@ -56,7 +56,7 @@ state_version: 1  # Increment if updating existing
 title: "Short title (max 120 chars)"
 problem: "What problem are we solving (max 240 chars)"
 target_user: "Who is this for (max 160 chars)"
-wow_slice: "Demo-able in <30s, one sentence (max 200 chars)"
+core_value: "Demo-able in <30s, one sentence (max 200 chars)"
 done_enough:
   - "Measurable completion criteria (max 200 chars each)"
   - "3-6 bullets"
@@ -140,7 +140,7 @@ def _validate_build_candidate(data: dict) -> Optional[str]:
     """Minimal validation for build_candidate.yaml."""
     required = [
         "schema_version", "build_id", "state_version", "title", "problem",
-        "target_user", "wow_slice", "done_enough", "constraints", "non_goals",
+        "target_user", "core_value", "done_enough", "constraints", "non_goals",
         "risks", "open_questions", "size_caps",
     ]
     for key in required:

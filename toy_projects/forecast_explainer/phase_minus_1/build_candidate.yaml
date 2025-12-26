@@ -4,7 +4,7 @@ state_version: 1
 title: "Toy Project — Forecast Explainer CLI"
 problem: "Need a deterministic CLI toy to validate the factory pipeline end-to-end."
 target_user: "Developer testing the factory"
-wow_slice: "Plan → approve → commit writes canonical pack into toy repo"
+core_value: "Plan → approve → commit writes canonical pack into toy repo"
 done_enough:
   - "CLI reads forecast.json and prints a human summary"
   - "Deterministic output (no web/API calls)"

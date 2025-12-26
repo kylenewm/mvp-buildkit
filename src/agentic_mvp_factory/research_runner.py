@@ -3,6 +3,7 @@
 Reads research_snapshot.yaml, searches for each question, populates findings.
 """
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -66,23 +67,37 @@ def _build_query(question: dict) -> str:
     return query
 
 
+def _result_to_source(result: SearchResult) -> dict:
+    """Convert a SearchResult to a source dict for answers section."""
+    return {
+        "url": result.url,
+        "title": result.title,
+        "snippet": result.snippet[:1500] if result.snippet else "",
+    }
+
+
 def _result_to_finding(
     result: SearchResult,
     finding_id: str,
     retrieved_at: str,
+    rq_id: Optional[str] = None,
 ) -> dict:
     """Convert a SearchResult to a finding dict."""
     is_tier1 = _is_tier1_url(result.url)
     
-    # Build claim from title/snippet (short, single sentence)
+    # Claim = title (or first sentence of snippet if title empty)
     claim = result.title
-    if len(claim) > 200:
+    if not claim and result.snippet:
+        # Use first sentence of snippet
+        first_sentence = result.snippet.split(". ")[0]
+        claim = _trim_to_length(first_sentence, 200)
+    elif len(claim) > 200:
         claim = _trim_to_length(claim, 200)
     
-    # Excerpt from snippet, trimmed
-    excerpt = _trim_to_length(result.snippet, 240)
+    # Excerpt = snippet (already trimmed to 800 by client)
+    excerpt = result.snippet.strip() if result.snippet else ""
     
-    return {
+    finding = {
         "id": finding_id,
         "claim": claim,
         "source_url": result.url,
@@ -91,6 +106,12 @@ def _result_to_finding(
         "tier": "tier1_official" if is_tier1 else "tier2_reputable",
         "confidence": "high" if is_tier1 else "med",
     }
+    
+    # Add rq_id if provided (trace back to research question)
+    if rq_id:
+        finding["rq_id"] = rq_id
+    
+    return finding
 
 
 def _count_file_size(data: dict) -> tuple:
@@ -105,19 +126,22 @@ def run_research(
     input_path: Path,
     output_path: Path,
     provider: str,
-    max_results_per_question: int = 3,
-    findings_per_question: int = 2,
+    max_results_per_question: int = 10,
+    findings_per_question: int = 3,
     mark_sufficient: bool = False,
 ) -> ResearchRunResult:
     """
     Run research for all questions in research_snapshot.yaml.
     
+    Fetches max_results_per_question candidates, filters/ranks for relevance,
+    and selects top findings_per_question for each research question.
+    
     Args:
         input_path: Path to input research_snapshot.yaml
         output_path: Path to write updated research_snapshot.yaml
         provider: Search provider ("tavily" or "exa")
-        max_results_per_question: Max search results per question
-        findings_per_question: Max findings to create per question
+        max_results_per_question: Max search results to fetch (for filtering)
+        findings_per_question: Max findings to keep per question after filtering
         mark_sufficient: If True, set sufficiency.status to "sufficient"
     
     Returns:
@@ -177,10 +201,13 @@ def run_research(
     
     # Process each research question
     new_findings: List[dict] = []
+    new_answers: List[dict] = []
     questions_processed = 0
     
     for question in data.get("research_questions", []):
+        rq_id = question.get("id", "")
         query = _build_query(question)
+        question_text = question.get("question", "")
         if not query:
             continue
         
@@ -193,15 +220,38 @@ def run_research(
         
         questions_processed += 1
         
-        # Create findings from results (limit to findings_per_question)
+        # Get Tavily's synthesized answer (stored on client after search)
+        tavily_answer = getattr(client, "last_answer", "") or ""
+        
+        # Build sources from results (top N with non-empty snippets)
+        sources = []
         for result in results[:findings_per_question]:
+            if result.snippet and len(result.snippet.strip()) >= 60:
+                sources.append(_result_to_source(result))
+        
+        # Store answer entry (Tavily answer + supporting sources)
+        if tavily_answer or sources:
+            new_answers.append({
+                "rq_id": rq_id,
+                "question": question_text,
+                "answer": tavily_answer,
+                "sources": sources,
+            })
+        
+        # Also create findings for backwards compatibility
+        for result in results[:findings_per_question]:
+            if not result.snippet or len(result.snippet.strip()) < 60:
+                continue
             finding_id = f"F{next_finding_num}"
-            finding = _result_to_finding(result, finding_id, now)
+            finding = _result_to_finding(result, finding_id, now, rq_id=rq_id)
             new_findings.append(finding)
             next_finding_num += 1
     
     # Combine findings
     all_findings = existing_findings + new_findings
+    
+    # Store answers (replace any existing)
+    data["answers"] = new_answers
     
     # Update data
     data["retrieved_at"] = now
@@ -212,13 +262,13 @@ def run_research(
     if mark_sufficient:
         data["sufficiency"] = {
             "status": "sufficient",
-            "rationale": f"Research conducted on {now}. {len(all_findings)} findings collected.",
+            "rationale": f"Research conducted on {now}. {len(new_answers)} answers, {len(all_findings)} findings.",
         }
     elif data.get("sufficiency", {}).get("status") == "unknown":
         # Keep as unknown but update rationale
         data["sufficiency"]["rationale"] = (
             f"Research conducted on {now}. "
-            f"{len(all_findings)} findings collected. "
+            f"{len(new_answers)} answers, {len(all_findings)} findings. "
             "Human review needed to determine sufficiency."
         )
     

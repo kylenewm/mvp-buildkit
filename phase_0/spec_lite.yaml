@@ -3,7 +3,7 @@ build_id: "B01"
 
 north_star:
   user: "Solo developer or small team building MVPs"
-  wow_slice: "Run council plan, get 3-model debate synthesis, approve with one command, see artifacts committed to repo."
+  core_value: "Run council plan, get 3-model debate synthesis, approve with one command, see artifacts committed to repo."
   success_criteria:
     - "CLI runs multi-model planning council end-to-end"
     - "Human can approve/edit/reject before commit"

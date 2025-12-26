@@ -6,7 +6,7 @@ title: "Agentic MVP Factory CLI"
 problem: "Manual coordination of LLM council workflows is error-prone and loses state across sessions"
 target_user: "Developers building AI-assisted coding tools with structured review workflows"
 
-wow_slice: "Run council plan, approve, and commit artifacts to a target repo in under 60 seconds"
+core_value: "Run council plan, approve, and commit artifacts to a target repo in under 60 seconds"
 done_enough:
   - "CLI runs planning council with multiple models"
   - "Artifacts persist to Postgres across sessions"

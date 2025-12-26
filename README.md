@@ -69,7 +69,7 @@ flowchart TD
   %% ======================
   %% PHASE -1
   %% ======================
-  A["Phase -1A: Build Commitment<br/>build_candidate.yaml<br/>- problem<br/>- target user<br/>- wow slice<br/>- constraints"] --> B["Phase -1B: Research Bounds<br/>research_snapshot.yaml<br/>- questions<br/>- findings<br/>- unknowns"]
+  A["Phase -1A: Build Commitment<br/>build_candidate.yaml<br/>- problem<br/>- target user<br/>- core value<br/>- constraints"] --> B["Phase -1B: Research Bounds<br/>research_snapshot.yaml<br/>- questions<br/>- findings<br/>- unknowns"]
   
   B --> C{"Phase -1 Guard + HITL<br/>Human confirms:<br/>- build is real<br/>- research sufficient"}
 

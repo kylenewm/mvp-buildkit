@@ -24,6 +24,10 @@ dependencies = [
 dev = [
     "pytest>=7.0.0",
 ]
+reranker = [
+    "sentence-transformers>=2.2.0",
+    "torch>=2.0.0",
+]
 
 [project.scripts]
 council = "agentic_mvp_factory.cli:cli"

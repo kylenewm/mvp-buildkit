@@ -10,7 +10,7 @@
       "title",
       "problem",
       "target_user",
-      "wow_slice",
+      "core_value",
       "done_enough",
       "constraints",
       "non_goals",
@@ -27,7 +27,7 @@
       "problem": { "type": "string", "minLength": 1, "maxLength": 240 },
       "target_user": { "type": "string", "minLength": 1, "maxLength": 160 },
   
-      "wow_slice": {
+      "core_value": {
         "type": "string",
         "minLength": 1,
         "maxLength": 200,
