@@ -681,6 +681,10 @@ def commit_outputs(
             manifest.stable_paths_written.append(path)
             manifest.file_hashes[path] = _compute_sha256(content)
         
+        # Optional: Write the plan/synthesis to snapshot (not canonical, for reference)
+        plan_snapshot_path = snapshot_dir / "plan.md"
+        plan_snapshot_path.write_text(f"# Plan (from run {run_id})\n\n{synthesis_content}")
+        
         # Write manifest to snapshot directory (required)
         manifest_path = snapshot_dir / "COMMIT_MANIFEST.md"
         manifest_path.write_text(manifest.to_markdown())

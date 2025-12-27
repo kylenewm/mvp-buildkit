@@ -134,6 +134,7 @@ def _generate_invariants_draft(
     run_id: str,
     model: str,
     spec_content: str,
+    n_models: int = 3,
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Generate a single invariants markdown draft.
     
@@ -165,6 +166,9 @@ Output ONLY markdown, starting with # Invariants (V0).""",
             timeout=120.0,
             phase="invariants_draft",
             run_id=run_id,
+            stage="invariants",
+            role="draft",
+            n_models=n_models,
         )
         
         artifact = write_artifact(
@@ -193,6 +197,7 @@ def _generate_invariants_critique(
     model: str,
     spec_content: str,
     drafts_text: str,
+    n_models: int = 3,
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Generate an invariants critique.
     
@@ -227,6 +232,9 @@ Provide your critique of these invariants drafts.""",
             timeout=120.0,
             phase="invariants_critique",
             run_id=run_id,
+            stage="invariants",
+            role="critique",
+            n_models=n_models,
         )
         
         artifact = write_artifact(
@@ -285,7 +293,7 @@ def run_invariants_council(
         )
     
     # 2. Load SPEC artifact (invariants depends on spec, not plan directly)
-    spec_run = get_latest_approved_run_by_task_type(plan_run_id, "spec")
+    spec_run = get_latest_approved_run_by_task_type("spec", plan_run_id)
     if not spec_run:
         raise ValueError(
             f"No approved spec run found for plan {plan_run_id}. "
@@ -320,14 +328,15 @@ def run_invariants_council(
     )
     
     failed_models: List[str] = []
+    n_models = len(models)
     
     # 3. Generate drafts in parallel
     update_run_status(inv_run.id, "drafting")
     
     draft_ids: List[str] = []
-    with ThreadPoolExecutor(max_workers=len(models)) as executor:
+    with ThreadPoolExecutor(max_workers=n_models) as executor:
         futures = {
-            executor.submit(_generate_invariants_draft, run_id, model, spec_content): model
+            executor.submit(_generate_invariants_draft, run_id, model, spec_content, n_models): model
             for model in models
         }
         
@@ -352,9 +361,9 @@ def run_invariants_council(
         drafts_text += f"\n=== DRAFT {i} (model={draft.model}) ===\n{draft.content}\n=== END DRAFT {i} ===\n"
     
     critique_ids: List[str] = []
-    with ThreadPoolExecutor(max_workers=len(models)) as executor:
+    with ThreadPoolExecutor(max_workers=n_models) as executor:
         futures = {
-            executor.submit(_generate_invariants_critique, run_id, model, spec_content, drafts_text): model
+            executor.submit(_generate_invariants_critique, run_id, model, spec_content, drafts_text, n_models): model
             for model in models
         }
         
@@ -407,6 +416,9 @@ Output ONLY markdown, starting with # Invariants (V0).""",
             timeout=180.0,
             phase="invariants_chair",
             run_id=run_id,
+            stage="invariants",
+            role="chair",
+            n_models=n_models,
         )
         
         # Clean chair output

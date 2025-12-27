@@ -99,6 +99,7 @@ def _generate_spec_draft(
     run_id: str,
     model: str,
     plan_content: str,
+    n_models: int = 3,
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Generate a single spec draft.
     
@@ -133,6 +134,9 @@ Output ONLY valid YAML.""",
             timeout=120.0,
             phase="spec_draft",
             run_id=run_id,
+            stage="spec",
+            role="draft",
+            n_models=n_models,
         )
         
         artifact = write_artifact(
@@ -161,6 +165,7 @@ def _generate_spec_critique(
     model: str,
     plan_content: str,
     drafts_text: str,
+    n_models: int = 3,
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Generate a spec critique.
     
@@ -195,6 +200,9 @@ Provide your critique of these spec drafts.""",
             timeout=120.0,
             phase="spec_critique",
             run_id=run_id,
+            stage="spec",
+            role="critique",
+            n_models=n_models,
         )
         
         artifact = write_artifact(
@@ -285,14 +293,15 @@ def run_spec_council(
     )
     
     failed_models: List[str] = []
+    n_models = len(models)
     
     # 3. Generate drafts in parallel
     update_run_status(spec_run.id, "drafting")
     
     draft_ids: List[str] = []
-    with ThreadPoolExecutor(max_workers=len(models)) as executor:
+    with ThreadPoolExecutor(max_workers=n_models) as executor:
         futures = {
-            executor.submit(_generate_spec_draft, run_id, model, plan_content): model
+            executor.submit(_generate_spec_draft, run_id, model, plan_content, n_models): model
             for model in models
         }
         
@@ -317,9 +326,9 @@ def run_spec_council(
         drafts_text += f"\n=== DRAFT {i} (model={draft.model}) ===\n{draft.content}\n=== END DRAFT {i} ===\n"
     
     critique_ids: List[str] = []
-    with ThreadPoolExecutor(max_workers=len(models)) as executor:
+    with ThreadPoolExecutor(max_workers=n_models) as executor:
         futures = {
-            executor.submit(_generate_spec_critique, run_id, model, plan_content, drafts_text): model
+            executor.submit(_generate_spec_critique, run_id, model, plan_content, drafts_text, n_models): model
             for model in models
         }
         
@@ -375,6 +384,9 @@ Output ONLY valid YAML, no markdown fences.""",
             timeout=180.0,
             phase="spec_chair",
             run_id=run_id,
+            stage="spec",
+            role="chair",
+            n_models=n_models,
         )
         
         # Validate chair output is valid YAML before storing

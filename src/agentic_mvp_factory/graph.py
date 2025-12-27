@@ -82,6 +82,7 @@ def _generate_single_draft(
     model: str,
     packet_content: str,
     context_content: Optional[str] = None,
+    n_models: int = 3,
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Generate a single draft for one model.
     
@@ -90,6 +91,7 @@ def _generate_single_draft(
         model: Model ID to use
         packet_content: The planning packet content
         context_content: Optional Phase 0 context pack content (S03)
+        n_models: Number of drafter models (for token budget calculation)
     
     Returns:
         Tuple of (model, artifact_id or None, error_message or None)
@@ -125,6 +127,9 @@ Output a coherent plan with clear sections."""
             timeout=120.0,
             phase="draft",
             run_id=run_id,
+            stage="plan",
+            role="draft",
+            n_models=n_models,
         )
         
         artifact = write_artifact(
@@ -150,6 +155,7 @@ def _generate_single_critique(
     model: str,
     drafts_text: str,
     context_content: Optional[str] = None,
+    n_models: int = 3,
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Generate a single critique for one model.
     
@@ -158,6 +164,7 @@ def _generate_single_critique(
         model: Model ID to use
         drafts_text: Formatted text of all drafts
         context_content: Optional Phase 0 context pack content (S03)
+        n_models: Number of drafter models (for token budget calculation)
     
     Returns:
         Tuple of (model, artifact_id or None, error_message or None)
@@ -196,6 +203,9 @@ Be direct and specific."""
             timeout=120.0,
             phase="critique",
             run_id=run_id,
+            stage="plan",
+            role="critique",
+            n_models=n_models,
         )
         
         artifact = write_artifact(
@@ -296,9 +306,10 @@ def draft_generate(state: CouncilState) -> CouncilState:
     failed_models: List[str] = []
     
     # Run drafts in parallel (S03: pass context)
-    with ThreadPoolExecutor(max_workers=len(models)) as executor:
+    n_models = len(models)
+    with ThreadPoolExecutor(max_workers=n_models) as executor:
         futures = {
-            executor.submit(_generate_single_draft, run_id, model, packet_content, context_content): model
+            executor.submit(_generate_single_draft, run_id, model, packet_content, context_content, n_models): model
             for model in models
         }
         
@@ -366,11 +377,12 @@ def critique_generate(state: CouncilState) -> CouncilState:
         drafts_text += f"\n## Draft {i} (from {draft.model})\n\n{draft.content}\n\n---\n"
     
     critique_ids: List[str] = []
+    n_models = len(models)
     
     # Run critiques in parallel (S03: pass context)
-    with ThreadPoolExecutor(max_workers=len(models)) as executor:
+    with ThreadPoolExecutor(max_workers=n_models) as executor:
         futures = {
-            executor.submit(_generate_single_critique, run_id, model, drafts_text, context_content): model
+            executor.submit(_generate_single_critique, run_id, model, drafts_text, context_content, n_models): model
             for model in models
         }
         
@@ -400,6 +412,7 @@ def chair_synthesize(state: CouncilState) -> CouncilState:
     chair_model = state.get("chair_model", "")
     packet_content = state.get("packet_content", "")
     context_content = state.get("context_content")  # S03: optional context
+    n_models = len(state.get("models", []))  # For token budget calculation
     
     # Handle missing required fields
     if not run_id or not chair_model:
@@ -478,6 +491,9 @@ Produce your synthesis and decision packet."""
             timeout=180.0,
             phase="chair",
             run_id=run_id,
+            stage="plan",
+            role="chair",
+            n_models=n_models,
         )
         
         # Store synthesis

@@ -2,15 +2,51 @@
 
 import os
 from pathlib import Path
+from typing import Optional
 from uuid import UUID
 
 import click
 from dotenv import load_dotenv
 
 from agentic_mvp_factory.config import ConfigError, load_config
+from agentic_mvp_factory.constants import DEFAULT_MODELS, DEFAULT_CHAIR_MODEL, DEFAULT_MODELS_CSV
 
 # Load .env file on CLI startup
 load_dotenv()
+
+
+# =============================================================================
+# HELPERS: Default run selection
+# =============================================================================
+
+def _get_latest_run_id(
+    project_slug: Optional[str] = None,
+    task_type: Optional[str] = None,
+    status: Optional[str] = None,
+) -> Optional[str]:
+    """Get the most recent run ID matching the filters.
+    
+    Returns None if no matching run found.
+    
+    Note: "approved" is a virtual status that matches "ready_to_commit" or "completed".
+    """
+    from agentic_mvp_factory.repo import list_runs
+    
+    # "approved" is a virtual status — map to actual DB statuses
+    if status == "approved":
+        runs = list_runs(project_slug=project_slug, status=None, limit=50)
+        runs = [r for r in runs if r.status in ("ready_to_commit", "completed")]
+    else:
+        runs = list_runs(project_slug=project_slug, status=status, limit=50)
+    
+    # Filter by task_type if provided
+    if task_type:
+        runs = [r for r in runs if r.task_type == task_type]
+    
+    if not runs:
+        return None
+    
+    return str(runs[0].id)
 
 
 @click.group()
@@ -155,13 +191,13 @@ def run():
 )
 @click.option(
     "--models",
-    required=True,
-    help="Comma-separated list of model IDs for drafts/critiques",
+    default=None,
+    help=f"Comma-separated list of model IDs (default: {DEFAULT_MODELS_CSV})",
 )
 @click.option(
     "--chair",
-    required=True,
-    help="Model ID for chair synthesis",
+    default=None,
+    help=f"Model ID for chair synthesis (default: {DEFAULT_CHAIR_MODEL})",
 )
 @click.option(
     "--phase-1-check",
@@ -222,11 +258,16 @@ def run_plan(project: str, packet: str, models: str, chair: str, phase_1_check: 
         click.echo("Error: OPENROUTER_API_KEY environment variable is required.", err=True)
         raise SystemExit(1)
     
-    # Parse models
-    model_list = [m.strip() for m in models.split(",") if m.strip()]
-    if len(model_list) < 2:
-        click.echo("Error: At least 2 models are required.", err=True)
-        raise SystemExit(1)
+    # Parse models (use defaults if not provided)
+    if models:
+        model_list = [m.strip() for m in models.split(",") if m.strip()]
+        if len(model_list) < 2:
+            click.echo("Error: At least 2 models are required.", err=True)
+            raise SystemExit(1)
+    else:
+        model_list = DEFAULT_MODELS.copy()
+    
+    effective_chair = chair if chair else DEFAULT_CHAIR_MODEL
     
     # S03: Validate and read context file if provided
     context_content = None
@@ -247,7 +288,7 @@ def run_plan(project: str, packet: str, models: str, chair: str, phase_1_check: 
     if context:
         click.echo(f"  Context: {context}")
     click.echo(f"  Models: {model_list}")
-    click.echo(f"  Chair: {chair}")
+    click.echo(f"  Chair: {effective_chair}")
     click.echo()
     
     try:
@@ -263,7 +304,7 @@ def run_plan(project: str, packet: str, models: str, chair: str, phase_1_check: 
             project_slug=project,
             packet_path=packet,
             models=model_list,
-            chair_model=chair,
+            chair_model=effective_chair,
             context_content=context_content,
             context_path=context if context else None,
         )
@@ -304,8 +345,8 @@ def run_plan(project: str, packet: str, models: str, chair: str, phase_1_check: 
 @click.option(
     "--from-plan",
     "plan_run_id",
-    required=True,
-    help="Run ID of the approved plan to generate spec from",
+    default=None,
+    help="Run ID of the approved plan (default: latest approved plan)",
 )
 @click.option(
     "--project",
@@ -314,13 +355,13 @@ def run_plan(project: str, packet: str, models: str, chair: str, phase_1_check: 
 )
 @click.option(
     "--models",
-    required=True,
-    help="Comma-separated list of model IDs for drafts/critiques",
+    default=None,
+    help=f"Comma-separated list of model IDs (default: {DEFAULT_MODELS_CSV})",
 )
 @click.option(
     "--chair",
-    required=True,
-    help="Model ID for chair synthesis",
+    default=None,
+    help=f"Model ID for chair synthesis (default: {DEFAULT_CHAIR_MODEL})",
 )
 def run_spec(plan_run_id: str, project: str, models: str, chair: str):
     """Run a spec generation council (Phase 2).
@@ -338,24 +379,38 @@ def run_spec(plan_run_id: str, project: str, models: str, chair: str):
         click.echo("Error: OPENROUTER_API_KEY environment variable is required.", err=True)
         raise SystemExit(1)
     
+    # Get plan run ID (use latest approved if not provided)
+    effective_plan_id = plan_run_id
+    if not effective_plan_id:
+        effective_plan_id = _get_latest_run_id(project_slug=project, task_type="plan", status="approved")
+        if not effective_plan_id:
+            click.echo("Error: No approved plan run found. Provide --from-plan.", err=True)
+            raise SystemExit(1)
+        click.echo(f"Using latest approved plan: {effective_plan_id}")
+    
     # Validate plan run ID
     try:
-        plan_uuid = UUIDType(plan_run_id)
+        plan_uuid = UUIDType(effective_plan_id)
     except ValueError:
-        click.echo(f"Error: Invalid plan run ID format: {plan_run_id}", err=True)
+        click.echo(f"Error: Invalid plan run ID format: {effective_plan_id}", err=True)
         raise SystemExit(1)
     
-    # Parse models
-    model_list = [m.strip() for m in models.split(",") if m.strip()]
-    if len(model_list) < 2:
-        click.echo("Error: At least 2 models are required.", err=True)
-        raise SystemExit(1)
+    # Parse models (use defaults if not provided)
+    if models:
+        model_list = [m.strip() for m in models.split(",") if m.strip()]
+        if len(model_list) < 2:
+            click.echo("Error: At least 2 models are required.", err=True)
+            raise SystemExit(1)
+    else:
+        model_list = DEFAULT_MODELS.copy()
+    
+    effective_chair = chair if chair else DEFAULT_CHAIR_MODEL
     
     click.echo(f"Running spec council (Phase 2)")
-    click.echo(f"  From plan: {plan_run_id}")
+    click.echo(f"  From plan: {effective_plan_id}")
     click.echo(f"  Project: {project}")
     click.echo(f"  Models: {model_list}")
-    click.echo(f"  Chair: {chair}")
+    click.echo(f"  Chair: {effective_chair}")
     click.echo()
     
     try:
@@ -371,7 +426,7 @@ def run_spec(plan_run_id: str, project: str, models: str, chair: str):
             plan_run_id=plan_uuid,
             project_slug=project,
             models=model_list,
-            chair_model=chair,
+            chair_model=effective_chair,
         )
         
         click.echo()
@@ -420,8 +475,8 @@ def run_spec(plan_run_id: str, project: str, models: str, chair: str):
 @click.option(
     "--from-plan",
     "plan_run_id",
-    required=True,
-    help="Run ID of the approved plan to generate tracker from",
+    default=None,
+    help="Run ID of the approved plan (default: latest approved plan)",
 )
 @click.option(
     "--project",
@@ -430,13 +485,13 @@ def run_spec(plan_run_id: str, project: str, models: str, chair: str):
 )
 @click.option(
     "--models",
-    required=True,
-    help="Comma-separated list of model IDs for drafts/critiques",
+    default=None,
+    help=f"Comma-separated list of model IDs (default: {DEFAULT_MODELS_CSV})",
 )
 @click.option(
     "--chair",
-    required=True,
-    help="Model ID for chair synthesis",
+    default=None,
+    help=f"Model ID for chair synthesis (default: {DEFAULT_CHAIR_MODEL})",
 )
 def run_tracker(plan_run_id: str, project: str, models: str, chair: str):
     """Run a tracker generation council (Phase 2).
@@ -454,24 +509,38 @@ def run_tracker(plan_run_id: str, project: str, models: str, chair: str):
         click.echo("Error: OPENROUTER_API_KEY environment variable is required.", err=True)
         raise SystemExit(1)
     
+    # Get plan run ID (use latest approved if not provided)
+    effective_plan_id = plan_run_id
+    if not effective_plan_id:
+        effective_plan_id = _get_latest_run_id(project_slug=project, task_type="plan", status="approved")
+        if not effective_plan_id:
+            click.echo("Error: No approved plan run found. Provide --from-plan.", err=True)
+            raise SystemExit(1)
+        click.echo(f"Using latest approved plan: {effective_plan_id}")
+    
     # Validate plan run ID
     try:
-        plan_uuid = UUIDType(plan_run_id)
+        plan_uuid = UUIDType(effective_plan_id)
     except ValueError:
-        click.echo(f"Error: Invalid plan run ID format: {plan_run_id}", err=True)
+        click.echo(f"Error: Invalid plan run ID format: {effective_plan_id}", err=True)
         raise SystemExit(1)
     
-    # Parse models
-    model_list = [m.strip() for m in models.split(",") if m.strip()]
-    if len(model_list) < 2:
-        click.echo("Error: At least 2 models are required.", err=True)
-        raise SystemExit(1)
+    # Parse models (use defaults if not provided)
+    if models:
+        model_list = [m.strip() for m in models.split(",") if m.strip()]
+        if len(model_list) < 2:
+            click.echo("Error: At least 2 models are required.", err=True)
+            raise SystemExit(1)
+    else:
+        model_list = DEFAULT_MODELS.copy()
+    
+    effective_chair = chair if chair else DEFAULT_CHAIR_MODEL
     
     click.echo(f"Running tracker council (Phase 2)")
-    click.echo(f"  From plan: {plan_run_id}")
+    click.echo(f"  From plan: {effective_plan_id}")
     click.echo(f"  Project: {project}")
     click.echo(f"  Models: {model_list}")
-    click.echo(f"  Chair: {chair}")
+    click.echo(f"  Chair: {effective_chair}")
     click.echo()
     
     try:
@@ -487,7 +556,7 @@ def run_tracker(plan_run_id: str, project: str, models: str, chair: str):
             plan_run_id=plan_uuid,
             project_slug=project,
             models=model_list,
-            chair_model=chair,
+            chair_model=effective_chair,
         )
         
         click.echo()
@@ -533,8 +602,8 @@ def run_tracker(plan_run_id: str, project: str, models: str, chair: str):
 @click.option(
     "--from-plan",
     "plan_run_id",
-    required=True,
-    help="Run ID of the approved plan to generate prompts from",
+    default=None,
+    help="Run ID of the approved plan (default: latest approved plan)",
 )
 @click.option(
     "--project",
@@ -543,13 +612,13 @@ def run_tracker(plan_run_id: str, project: str, models: str, chair: str):
 )
 @click.option(
     "--models",
-    required=True,
-    help="Comma-separated list of model IDs for drafts/critiques",
+    default=None,
+    help=f"Comma-separated list of model IDs (default: {DEFAULT_MODELS_CSV})",
 )
 @click.option(
     "--chair",
-    required=True,
-    help="Model ID for chair synthesis",
+    default=None,
+    help=f"Model ID for chair synthesis (default: {DEFAULT_CHAIR_MODEL})",
 )
 def run_prompts(plan_run_id: str, project: str, models: str, chair: str):
     """Run a prompts generation council (Phase 2).
@@ -571,24 +640,38 @@ def run_prompts(plan_run_id: str, project: str, models: str, chair: str):
         click.echo("Error: OPENROUTER_API_KEY environment variable is required.", err=True)
         raise SystemExit(1)
     
+    # Get plan run ID (use latest approved if not provided)
+    effective_plan_id = plan_run_id
+    if not effective_plan_id:
+        effective_plan_id = _get_latest_run_id(project_slug=project, task_type="plan", status="approved")
+        if not effective_plan_id:
+            click.echo("Error: No approved plan run found. Provide --from-plan.", err=True)
+            raise SystemExit(1)
+        click.echo(f"Using latest approved plan: {effective_plan_id}")
+    
     # Validate plan run ID
     try:
-        plan_uuid = UUIDType(plan_run_id)
+        plan_uuid = UUIDType(effective_plan_id)
     except ValueError:
-        click.echo(f"Error: Invalid plan run ID format: {plan_run_id}", err=True)
+        click.echo(f"Error: Invalid plan run ID format: {effective_plan_id}", err=True)
         raise SystemExit(1)
     
-    # Parse models
-    model_list = [m.strip() for m in models.split(",") if m.strip()]
-    if len(model_list) < 2:
-        click.echo("Error: At least 2 models are required.", err=True)
-        raise SystemExit(1)
+    # Parse models (use defaults if not provided)
+    if models:
+        model_list = [m.strip() for m in models.split(",") if m.strip()]
+        if len(model_list) < 2:
+            click.echo("Error: At least 2 models are required.", err=True)
+            raise SystemExit(1)
+    else:
+        model_list = DEFAULT_MODELS.copy()
+    
+    effective_chair = chair if chair else DEFAULT_CHAIR_MODEL
     
     click.echo(f"Running prompts council (Phase 2)")
-    click.echo(f"  From plan: {plan_run_id}")
+    click.echo(f"  From plan: {effective_plan_id}")
     click.echo(f"  Project: {project}")
     click.echo(f"  Models: {model_list}")
-    click.echo(f"  Chair: {chair}")
+    click.echo(f"  Chair: {effective_chair}")
     click.echo()
     
     try:
@@ -604,7 +687,7 @@ def run_prompts(plan_run_id: str, project: str, models: str, chair: str):
             plan_run_id=plan_uuid,
             project_slug=project,
             models=model_list,
-            chair_model=chair,
+            chair_model=effective_chair,
         )
         
         click.echo()
@@ -650,8 +733,8 @@ def run_prompts(plan_run_id: str, project: str, models: str, chair: str):
 @click.option(
     "--from-plan",
     "plan_run_id",
-    required=True,
-    help="Run ID of the approved plan to generate cursor rules from",
+    default=None,
+    help="Run ID of the approved plan (default: latest approved plan)",
 )
 @click.option(
     "--project",
@@ -660,13 +743,13 @@ def run_prompts(plan_run_id: str, project: str, models: str, chair: str):
 )
 @click.option(
     "--models",
-    required=True,
-    help="Comma-separated list of model IDs for drafts/critiques",
+    default=None,
+    help=f"Comma-separated list of model IDs (default: {DEFAULT_MODELS_CSV})",
 )
 @click.option(
     "--chair",
-    required=True,
-    help="Model ID for chair synthesis",
+    default=None,
+    help=f"Model ID for chair synthesis (default: {DEFAULT_CHAIR_MODEL})",
 )
 def run_cursor_rules(plan_run_id: str, project: str, models: str, chair: str):
     """Run a cursor rules generation council (Phase 2).
@@ -686,24 +769,38 @@ def run_cursor_rules(plan_run_id: str, project: str, models: str, chair: str):
         click.echo("Error: OPENROUTER_API_KEY environment variable is required.", err=True)
         raise SystemExit(1)
     
+    # Get plan run ID (use latest approved if not provided)
+    effective_plan_id = plan_run_id
+    if not effective_plan_id:
+        effective_plan_id = _get_latest_run_id(project_slug=project, task_type="plan", status="approved")
+        if not effective_plan_id:
+            click.echo("Error: No approved plan run found. Provide --from-plan.", err=True)
+            raise SystemExit(1)
+        click.echo(f"Using latest approved plan: {effective_plan_id}")
+    
     # Validate plan run ID
     try:
-        plan_uuid = UUIDType(plan_run_id)
+        plan_uuid = UUIDType(effective_plan_id)
     except ValueError:
-        click.echo(f"Error: Invalid plan run ID format: {plan_run_id}", err=True)
+        click.echo(f"Error: Invalid plan run ID format: {effective_plan_id}", err=True)
         raise SystemExit(1)
     
-    # Parse models
-    model_list = [m.strip() for m in models.split(",") if m.strip()]
-    if len(model_list) < 2:
-        click.echo("Error: At least 2 models are required.", err=True)
-        raise SystemExit(1)
+    # Parse models (use defaults if not provided)
+    if models:
+        model_list = [m.strip() for m in models.split(",") if m.strip()]
+        if len(model_list) < 2:
+            click.echo("Error: At least 2 models are required.", err=True)
+            raise SystemExit(1)
+    else:
+        model_list = DEFAULT_MODELS.copy()
+    
+    effective_chair = chair if chair else DEFAULT_CHAIR_MODEL
     
     click.echo(f"Running cursor rules council (Phase 2)")
-    click.echo(f"  From plan: {plan_run_id}")
+    click.echo(f"  From plan: {effective_plan_id}")
     click.echo(f"  Project: {project}")
     click.echo(f"  Models: {model_list}")
-    click.echo(f"  Chair: {chair}")
+    click.echo(f"  Chair: {effective_chair}")
     click.echo()
     
     try:
@@ -719,7 +816,7 @@ def run_cursor_rules(plan_run_id: str, project: str, models: str, chair: str):
             plan_run_id=plan_uuid,
             project_slug=project,
             models=model_list,
-            chair_model=chair,
+            chair_model=effective_chair,
         )
         
         click.echo()
@@ -765,8 +862,8 @@ def run_cursor_rules(plan_run_id: str, project: str, models: str, chair: str):
 @click.option(
     "--from-plan",
     "plan_run_id",
-    required=True,
-    help="Run ID of the approved plan to generate invariants from",
+    default=None,
+    help="Run ID of the approved plan (default: latest approved plan)",
 )
 @click.option(
     "--project",
@@ -775,13 +872,13 @@ def run_cursor_rules(plan_run_id: str, project: str, models: str, chair: str):
 )
 @click.option(
     "--models",
-    required=True,
-    help="Comma-separated list of model IDs for drafts/critiques",
+    default=None,
+    help=f"Comma-separated list of model IDs (default: {DEFAULT_MODELS_CSV})",
 )
 @click.option(
     "--chair",
-    required=True,
-    help="Model ID for chair synthesis",
+    default=None,
+    help=f"Model ID for chair synthesis (default: {DEFAULT_CHAIR_MODEL})",
 )
 def run_invariants(plan_run_id: str, project: str, models: str, chair: str):
     """Run an invariants generation council (Phase 2).
@@ -800,24 +897,38 @@ def run_invariants(plan_run_id: str, project: str, models: str, chair: str):
         click.echo("Error: OPENROUTER_API_KEY environment variable is required.", err=True)
         raise SystemExit(1)
     
+    # Get plan run ID (use latest approved if not provided)
+    effective_plan_id = plan_run_id
+    if not effective_plan_id:
+        effective_plan_id = _get_latest_run_id(project_slug=project, task_type="plan", status="approved")
+        if not effective_plan_id:
+            click.echo("Error: No approved plan run found. Provide --from-plan.", err=True)
+            raise SystemExit(1)
+        click.echo(f"Using latest approved plan: {effective_plan_id}")
+    
     # Validate plan run ID
     try:
-        plan_uuid = UUIDType(plan_run_id)
+        plan_uuid = UUIDType(effective_plan_id)
     except ValueError:
-        click.echo(f"Error: Invalid plan run ID format: {plan_run_id}", err=True)
+        click.echo(f"Error: Invalid plan run ID format: {effective_plan_id}", err=True)
         raise SystemExit(1)
     
-    # Parse models
-    model_list = [m.strip() for m in models.split(",") if m.strip()]
-    if len(model_list) < 2:
-        click.echo("Error: At least 2 models are required.", err=True)
-        raise SystemExit(1)
+    # Parse models (use defaults if not provided)
+    if models:
+        model_list = [m.strip() for m in models.split(",") if m.strip()]
+        if len(model_list) < 2:
+            click.echo("Error: At least 2 models are required.", err=True)
+            raise SystemExit(1)
+    else:
+        model_list = DEFAULT_MODELS.copy()
+    
+    effective_chair = chair if chair else DEFAULT_CHAIR_MODEL
     
     click.echo(f"Running invariants council (Phase 2)")
-    click.echo(f"  From plan: {plan_run_id}")
+    click.echo(f"  From plan: {effective_plan_id}")
     click.echo(f"  Project: {project}")
     click.echo(f"  Models: {model_list}")
-    click.echo(f"  Chair: {chair}")
+    click.echo(f"  Chair: {effective_chair}")
     click.echo()
     
     try:
@@ -833,7 +944,7 @@ def run_invariants(plan_run_id: str, project: str, models: str, chair: str):
             plan_run_id=plan_uuid,
             project_slug=project,
             models=model_list,
-            chair_model=chair,
+            chair_model=effective_chair,
         )
         
         click.echo()
@@ -1043,7 +1154,7 @@ def status(project: str, status_filter: str, limit: int):
 
 
 @cli.command()
-@click.argument("run_id")
+@click.argument("run_id", required=False, default=None)
 @click.option(
     "--section",
     type=click.Choice(["summary", "all", "packet", "drafts", "critiques", "synthesis", "decision", "plan", "errors", "status", "commit"]),
@@ -1061,10 +1172,18 @@ def status(project: str, status_filter: str, limit: int):
     help="Show full content without truncation",
 )
 def show(run_id: str, section: str, open_file: bool, full: bool):
-    """Show details of a specific run."""
+    """Show details of a specific run. Uses latest run if RUN_ID not provided."""
     import tempfile
     from uuid import UUID as UUIDType
     from agentic_mvp_factory.repo import get_run, get_artifacts
+    
+    # Use latest run if not provided
+    if not run_id:
+        run_id = _get_latest_run_id()
+        if not run_id:
+            click.echo("Error: No runs found. Provide a run ID.", err=True)
+            raise SystemExit(1)
+        click.echo(f"Using latest run: {run_id}")
     
     try:
         run_uuid = UUIDType(run_id)
@@ -1212,12 +1331,12 @@ def _output_result(lines: list, open_file: bool, run_id: str, section: str):
 
 
 @cli.command()
-@click.argument("run_id")
+@click.argument("run_id", required=False, default=None)
 @click.option("--approve", "action", flag_value="approve", help="Approve the run as-is")
 @click.option("--reject", "action", flag_value="reject", help="Reject and create new run with feedback")
 @click.option("--edit", "action", flag_value="edit", help="Edit synthesis in $EDITOR then approve")
 def approve(run_id: str, action: str):
-    """Approve, edit, or reject a run waiting for approval."""
+    """Approve, edit, or reject a run. Uses latest pending run if RUN_ID not provided."""
     import os
     import subprocess
     import tempfile
@@ -1230,6 +1349,14 @@ def approve(run_id: str, action: str):
     if not action:
         click.echo("Error: Must specify one of --approve, --reject, or --edit", err=True)
         raise SystemExit(1)
+    
+    # Use latest pending run if not provided
+    if not run_id:
+        run_id = _get_latest_run_id(status="waiting_for_approval")
+        if not run_id:
+            click.echo("Error: No runs waiting for approval.", err=True)
+            raise SystemExit(1)
+        click.echo(f"Using latest pending run: {run_id}")
     
     try:
         run_uuid = UUIDType(run_id)
@@ -1485,7 +1612,7 @@ def approve(run_id: str, action: str):
 
 
 @cli.command()
-@click.argument("run_id")
+@click.argument("run_id", required=False, default=None)
 @click.option(
     "--repo",
     required=True,
@@ -1493,11 +1620,19 @@ def approve(run_id: str, action: str):
     help="Target repository path to write outputs to",
 )
 def commit(run_id: str, repo: str):
-    """Commit approved run outputs to a target repository."""
+    """Commit run outputs to a target repository. Uses latest approved run if RUN_ID not provided."""
     from pathlib import Path
     from uuid import UUID as UUIDType
     from agentic_mvp_factory.repo import get_run
     from agentic_mvp_factory.repo_writer import commit_outputs, commit_spec_outputs, commit_tracker_outputs, commit_prompts_outputs, commit_cursor_rules_outputs, commit_invariants_outputs
+    
+    # Use latest approved run if not provided
+    if not run_id:
+        run_id = _get_latest_run_id(status="approved")
+        if not run_id:
+            click.echo("Error: No approved runs found.", err=True)
+            raise SystemExit(1)
+        click.echo(f"Using latest approved run: {run_id}")
     
     try:
         run_uuid = UUIDType(run_id)

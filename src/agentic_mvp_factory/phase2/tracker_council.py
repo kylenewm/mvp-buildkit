@@ -118,6 +118,7 @@ def _generate_tracker_draft(
     model: str,
     spec_content: str,
     invariants_content: str,
+    n_models: int = 3,
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Generate a single tracker draft.
     
@@ -157,6 +158,9 @@ Output ONLY valid YAML.""",
             timeout=120.0,
             phase="tracker_draft",
             run_id=run_id,
+            stage="tracker",
+            role="draft",
+            n_models=n_models,
         )
         
         artifact = write_artifact(
@@ -186,6 +190,7 @@ def _generate_tracker_critique(
     spec_content: str,
     invariants_content: str,
     drafts_text: str,
+    n_models: int = 3,
 ) -> Tuple[str, Optional[str], Optional[str]]:
     """Generate a tracker critique.
     
@@ -225,6 +230,9 @@ Check that each step respects the invariants.""",
             timeout=120.0,
             phase="tracker_critique",
             run_id=run_id,
+            stage="tracker",
+            role="critique",
+            n_models=n_models,
         )
         
         artifact = write_artifact(
@@ -283,7 +291,7 @@ def run_tracker_council(
         )
     
     # 2. Load SPEC artifact (tracker depends on spec, not plan directly)
-    spec_run = get_latest_approved_run_by_task_type(plan_run_id, "spec")
+    spec_run = get_latest_approved_run_by_task_type("spec", plan_run_id)
     if not spec_run:
         raise ValueError(
             f"No approved spec run found for plan {plan_run_id}. "
@@ -297,7 +305,7 @@ def run_tracker_council(
     spec_content = spec_artifacts[0].content
     
     # 3. Load INVARIANTS artifact (tracker also depends on invariants)
-    inv_run = get_latest_approved_run_by_task_type(plan_run_id, "invariants")
+    inv_run = get_latest_approved_run_by_task_type("invariants", plan_run_id)
     if not inv_run:
         raise ValueError(
             f"No approved invariants run found for plan {plan_run_id}. "
@@ -336,11 +344,12 @@ def run_tracker_council(
     
     # 3. Generate drafts in parallel
     update_run_status(tracker_run.id, "drafting")
+    n_models = len(models)
     
     draft_ids: List[str] = []
-    with ThreadPoolExecutor(max_workers=len(models)) as executor:
+    with ThreadPoolExecutor(max_workers=n_models) as executor:
         futures = {
-            executor.submit(_generate_tracker_draft, run_id, model, spec_content, invariants_content): model
+            executor.submit(_generate_tracker_draft, run_id, model, spec_content, invariants_content, n_models): model
             for model in models
         }
         
@@ -365,9 +374,9 @@ def run_tracker_council(
         drafts_text += f"\n=== DRAFT {i} (model={draft.model}) ===\n{draft.content}\n=== END DRAFT {i} ===\n"
     
     critique_ids: List[str] = []
-    with ThreadPoolExecutor(max_workers=len(models)) as executor:
+    with ThreadPoolExecutor(max_workers=n_models) as executor:
         futures = {
-            executor.submit(_generate_tracker_critique, run_id, model, spec_content, invariants_content, drafts_text): model
+            executor.submit(_generate_tracker_critique, run_id, model, spec_content, invariants_content, drafts_text, n_models): model
             for model in models
         }
         
@@ -428,6 +437,9 @@ Output ONLY valid YAML, no markdown fences.""",
             timeout=180.0,
             phase="tracker_chair",
             run_id=run_id,
+            stage="tracker",
+            role="chair",
+            n_models=n_models,
         )
         
         # Validate chair output is valid YAML before storing
