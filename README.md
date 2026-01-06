@@ -17,6 +17,8 @@ A **CLI-first, stateful “council runner”** that helps you turn a scoped buil
 - **Commit**: Writes stable canonical files + snapshots versioned output
 - **Provenance**: Run IDs, stored artifacts, and optional LangSmith traces
 
+**Please note**: Some small changes will be made by Jan 11 to make this work easy to download and run locally
+
 ### ❌ V0 does NOT provide
 - Web UI (CLI only)
 - Fully autonomous building or execution without approval
@@ -300,16 +302,6 @@ This keeps complexity from ballooning and prevents "artifact drift" across chats
 
 ---
 
-## Dogfooding (the intended meaning)
-
-Dogfooding means:
-
-> Use this factory to generate artifact packs for **other projects** you want to build in Cursor.
-
-It does **not** mean “the system should recursively build itself” as the primary workflow.
-
----
-
 ## Deep research (planned, not default)
 
 We keep deep research as a **swap-in module**, not a mandatory pipeline step.
@@ -359,10 +351,8 @@ V0 intentionally punts a custom UI.
 
 ---
 
-## Roadmap (brief, non-confusing)
+## Roadmap
 
 * **V0**: stable plan council + stable artifact pack generation + commit/snapshot
 * **V1** (optional): configurable research module + zip export + improved CLI UX
 * **V2+**: verification harness, sentinel checks, richer provenance policies (only if needed)
-
-If you’re reading this repo to use it: focus on V0 flow above.
